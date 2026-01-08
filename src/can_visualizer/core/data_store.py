@@ -186,6 +186,13 @@ class DataStore:
 
         return timestamps, values
 
+    def get_start_time(self) -> Optional[float]:
+        """Get the earliest timestamp in the store."""
+        with self._get_connection() as conn:
+            cursor = conn.execute("SELECT MIN(timestamp) as min_ts FROM signals")
+            row = cursor.fetchone()
+            return row["min_ts"] if row else None
+
     def get_total_count(self) -> int:
         """Get total number of records in the store."""
         with self._get_connection() as conn:

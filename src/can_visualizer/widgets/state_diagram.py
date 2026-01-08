@@ -4,11 +4,6 @@ State Diagram Widget - Gantt-Chart Style Timeline.
 Displays CAN signals as horizontal bars over time, similar to CANalyzer's
 state diagram view. Each signal is a row, with bar segments showing
 value changes over time.
-
-Features:
-- Interactive pan/zoom with mouse
-- Hover tooltips showing signal values
-- Playback cursor for timeline animation
 """
 
 from typing import Optional
@@ -41,12 +36,13 @@ from PySide6.QtGui import (
 )
 
 from ..core.models import DecodedSignal, SignalDefinition
+from ..core.data_store import DataStore
 from ..utils.logging_config import get_logger
 
 logger = get_logger("state_diagram")
 
 
-# Color palette for different state values
+# Color palette for different state value
 STATE_COLORS = [
     "#4ECDC4",  # Teal
     "#FF6B6B",  # Red
@@ -66,14 +62,6 @@ STATE_COLORS = [
 class StateTimelineRow(QFrame):
     """
     Single row in the state diagram representing one signal.
-
-    Displays horizontal bar segments where each segment represents
-    a time period with a constant value.
-
-    Features:
-    - Hover tooltip showing value at cursor position
-    - Mouse wheel zoom (forwarded to parent)
-    - Drag to pan (forwarded to parent)
     """
 
     ROW_HEIGHT = 50
@@ -152,14 +140,12 @@ class StateTimelineRow(QFrame):
         if end_time <= start_time:
             end_time = start_time + 0.001
         self.segments.append((start_time, end_time, value, color))
-        self.repaint()
 
     def update_last_segment(self, end_time: float) -> None:
         """Extend the last segment's end time."""
         if self.segments:
             start, _, value, color = self.segments[-1]
             self.segments[-1] = (start, end_time, value, color)
-            self.repaint()
 
     def set_time_range(self, time_min: float, time_max: float) -> None:
         """Set the visible time range for coordinate mapping."""
@@ -378,6 +364,8 @@ class StateTimelineRow(QFrame):
                     else:
                         display_value = f"{value:.1f}"
 
+                # Ensure display_value is a string (handles NamedSignalValue from cantools)
+                display_value = str(display_value)
                 text_width = fm.horizontalAdvance(display_value)
                 if text_width > segment_width - 6:
                     display_value = fm.elidedText(
@@ -405,11 +393,6 @@ class StateTimelineRow(QFrame):
 class TimeAxisWidget(QFrame):
     """
     Time axis header showing time scale.
-
-    Features:
-    - Mouse wheel zoom (centered on cursor)
-    - Drag to pan
-    - Double-click to reset view
     """
 
     LABEL_WIDTH = 120
@@ -817,29 +800,29 @@ class StateDiagramWidget(QWidget):
     - Hover tooltips showing signal values
     - Timeline playback with cursor
     - Adjustable playback speed
-    - Stores ALL signal data so signals can be added after parsing
+    - Data pulled from DataStore on demand
     """
 
     add_signals_requested = Signal()
 
     PLAYBACK_INTERVAL_MS = 50
-    MAX_STORED_SIGNALS = 100_000
     ZOOM_FACTOR = 0.15  # Zoom amount per wheel step
     MIN_TIME_RANGE = 0.001  # Minimum visible time range (1ms)
 
-    def __init__(self, parent=None):
+    def __init__(self, data_store: DataStore, parent=None):
         super().__init__(parent)
+        self._data_store = data_store
 
         self._signal_defs: dict[str, SignalDefinition] = {}
         self._active_signals: list[str] = []
         self._rows: dict[str, StateTimelineRow] = {}
         self._last_values: dict[str, tuple[float, float]] = {}
 
-        self._all_signal_data: dict[str, list[tuple[float, float]]] = {}
+        # Track last loaded absolute timestamp per signal
+        self._last_loaded_ts: dict[str, float] = {}
 
-        # Time offset - first timestamp becomes 0
-        self._time_offset = 0.0
-        self._time_offset_set = False
+        # Time offset - set on first load
+        self._time_offset: Optional[float] = None
 
         self._view_time_min = 0.0
         self._view_time_max = 10.0
@@ -857,12 +840,18 @@ class StateDiagramWidget(QWidget):
         self._playback_timer.setInterval(self.PLAYBACK_INTERVAL_MS)
         self._playback_timer.timeout.connect(self._on_playback_tick)
 
-        # Throttling for streaming updates (prevents UI blocking)
+        # Throttling for streaming updates
         self._view_update_pending = False
         self._view_update_timer = QTimer(self)
         self._view_update_timer.setSingleShot(True)
-        self._view_update_timer.setInterval(100)  # 100ms throttle (10 fps max)
+        self._view_update_timer.setInterval(100)  # 10 fps max
         self._view_update_timer.timeout.connect(self._do_deferred_view_update)
+
+        # Periodic update for streaming
+        self._auto_update_timer = QTimer(self)
+        self._auto_update_timer.setInterval(200)  # 5fps update check
+        self._auto_update_timer.timeout.connect(self._check_for_updates)
+        self._auto_update_timer.start()
 
         self._setup_ui()
 
@@ -941,23 +930,19 @@ class StateDiagramWidget(QWidget):
     def _on_wheel_zoom(self, delta: float, mouse_time: float) -> None:
         """Handle mouse wheel zoom centered on mouse position."""
         if self._is_running:
-            return  # Don't zoom during playback
+            return
 
-        # Calculate zoom factor
         if delta > 0:
-            factor = 1 - self.ZOOM_FACTOR  # Zoom in
+            factor = 1 - self.ZOOM_FACTOR
         else:
-            factor = 1 + self.ZOOM_FACTOR  # Zoom out
+            factor = 1 + self.ZOOM_FACTOR
 
-        # Current range
         current_range = self._view_time_max - self._view_time_min
         new_range = current_range * factor
 
-        # Clamp minimum zoom
         if new_range < self.MIN_TIME_RANGE:
             new_range = self.MIN_TIME_RANGE
 
-        # Keep mouse position fixed on screen
         mouse_ratio = (
             (mouse_time - self._view_time_min) / current_range
             if current_range > 0
@@ -974,7 +959,7 @@ class StateDiagramWidget(QWidget):
     def _on_drag_pan(self, delta_time: float) -> None:
         """Handle drag panning."""
         if self._is_running:
-            return  # Don't pan during playback
+            return
 
         self._view_time_min += delta_time
         self._view_time_max += delta_time
@@ -990,6 +975,13 @@ class StateDiagramWidget(QWidget):
         """Set which signals to display."""
         self._on_stop()
 
+        # Update time offset if needed
+        if self._time_offset is None:
+            self._time_offset = self._data_store.get_start_time()
+            # If still None, maybe data store is empty.
+            if self._time_offset is None:
+                self._time_offset = 0.0
+
         for name in list(self._rows.keys()):
             if name not in signal_names:
                 row = self._rows.pop(name)
@@ -997,19 +989,21 @@ class StateDiagramWidget(QWidget):
                 row.deleteLater()
                 if name in self._last_values:
                     del self._last_values[name]
+                if name in self._last_loaded_ts:
+                    del self._last_loaded_ts[name]
 
         for name in signal_names:
             if name not in self._rows:
                 sig_def = self._signal_defs.get(name)
                 row = StateTimelineRow(name, sig_def)
                 row.set_time_range(self._view_time_min, self._view_time_max)
-                # Connect row signals for zoom/pan
                 row.wheel_zoom.connect(self._on_wheel_zoom)
                 row.drag_pan.connect(self._on_drag_pan)
+
                 self._rows[name] = row
                 self._rows_layout.insertWidget(self._rows_layout.count() - 1, row)
 
-                self._rebuild_row_from_data(name, row)
+                self._load_data_for_row(name, row)
 
         self._active_signals = list(signal_names)
         self._empty_label.setVisible(len(self._active_signals) == 0)
@@ -1017,97 +1011,128 @@ class StateDiagramWidget(QWidget):
 
         self._fit_view_to_data()
 
-    def _rebuild_row_from_data(self, signal_name: str, row: StateTimelineRow) -> None:
-        """Rebuild a row's timeline from stored signal data."""
-        if signal_name not in self._all_signal_data:
+    def _load_data_for_row(self, full_name: str, row: StateTimelineRow) -> None:
+        """
+        Load data from DataStore and build segments.
+        Using full replacement for simple init.
+        """
+        signal_name = full_name.split(".")[-1]
+
+        # Get full history
+        timestamps, values = self._data_store.get_signal_data(signal_name)
+
+        if not timestamps:
+            self._last_loaded_ts[full_name] = 0.0
             return
 
-        data = self._all_signal_data[signal_name]
-        if not data:
+        self._add_segments_to_row(row, timestamps, values, full_name)
+
+        # Track last loaded absolute timestamp
+        self._last_loaded_ts[full_name] = timestamps[-1]
+
+    def _add_segments_to_row(
+        self,
+        row: StateTimelineRow,
+        timestamps: list[float],
+        values: list[float],
+        full_name: str,
+    ) -> None:
+        """Process timestamps and values into segments."""
+        if not timestamps:
             return
 
-        logger.info(
-            f"Rebuilding timeline for {signal_name} with {len(data)} data points"
-        )
+        # Ensure time offset is valid
+        if self._time_offset is None:
+            # Should already have been set, but fallback
+            self._time_offset = timestamps[0]
 
+        offset = self._time_offset
+
+        # We need state tracking to handle incremental
+        # If we have previous state for this signal, resume from there
         last_val = None
-        last_ts = None
 
-        for timestamp, value in data:
-            if last_val is None:
-                row.add_segment(timestamp, timestamp + 0.01, value)
-            elif abs(value - last_val) > 0.0001:
-                row.add_segment(timestamp, timestamp + 0.01, value)
+        # Check if we have existing state for this row?
+        # Actually StateTimelineRow keeps its specific state.
+        # But we need to know if we should close the previous segment from a previous batch.
+        # Ideally, we rebuild from scratch OR append.
+        # Here we are appending.
+
+        # Actually simple logic: create a segment for each point.
+        # Or optimization: combine adjacent identical values.
+
+        for absolute_ts, value in zip(timestamps, values):
+            rel_ts = absolute_ts - offset
+
+            # Update global time range
+            if rel_ts > self._data_time_max:
+                self._data_time_max = rel_ts
+
+            # Logic:
+            # If no previous value, start segment.
+            # If previous value same, extend previous segment.
+            # If previous value different, add new segment.
+
+            # Since row.segments stores start/end, we can check row.segments[-1]
+            if row.segments:
+                _, _, last_row_val, _ = row.segments[-1]
+                if abs(value - last_row_val) < 0.0001:
+                    row.update_last_segment(rel_ts)
+                else:
+                    # Previous segment ended at last_ts.
+                    # New segment starts at rel_ts.
+                    # Wait, CAN signals hold value until changed.
+                    # So previous segment effectively ends at CURRENT timestamp.
+                    row.update_last_segment(rel_ts)
+                    row.add_segment(rel_ts, rel_ts + 0.01, value)
             else:
-                row.update_last_segment(timestamp)
+                row.add_segment(rel_ts, rel_ts + 0.01, value)
 
-            last_val = value
-            last_ts = timestamp
+            self._last_values[full_name] = (rel_ts, value)
 
-        if last_ts is not None and last_val is not None:
-            self._last_values[signal_name] = (last_ts, last_val)
+    @Slot()
+    def new_data(self) -> None:
+        """Slot called when new data is available."""
+        # Trigger deferred check
+        pass
+
+    def _check_for_updates(self) -> None:
+        """Periodically check for fresh data."""
+        if not self._active_signals:
+            return
+
+        updated = False
+
+        # If time offset not set yet, try setting it
+        if self._time_offset is None:
+            self._time_offset = self._data_store.get_start_time()
+
+        for full_name in self._active_signals:
+            last_ts = self._last_loaded_ts.get(full_name, 0.0)
+            signal_name = full_name.split(".")[-1]
+
+            new_ts, new_val = self._data_store.get_signal_data(
+                signal_name, min_timestamp=last_ts
+            )
+
+            if new_ts:
+                row = self._rows.get(full_name)
+                if row:
+                    self._add_segments_to_row(row, new_ts, new_val, full_name)
+                    row.repaint()
+                    updated = True
+
+                self._last_loaded_ts[full_name] = new_ts[-1]
+
+        if updated and not self._is_running:
+            self._request_view_update()
 
     def get_active_signals(self) -> list[str]:
         """Get list of currently active signal names."""
         return self._active_signals.copy()
 
-    @Slot(list)
-    def add_signals(self, signals: list[DecodedSignal]) -> None:
-        """Add new decoded signals (streaming mode)."""
-        for signal in signals:
-            full_name = signal.full_name
-            abs_timestamp = signal.timestamp
-            value = signal.raw_value
-
-            # Set time offset on first signal (first timestamp becomes 0)
-            if not self._time_offset_set:
-                self._time_offset = abs_timestamp
-                self._time_offset_set = True
-
-            # Convert to relative time (duration from start)
-            rel_timestamp = abs_timestamp - self._time_offset
-
-            if full_name not in self._all_signal_data:
-                self._all_signal_data[full_name] = []
-
-            # Store relative timestamp
-            self._all_signal_data[full_name].append((rel_timestamp, value))
-
-            if len(self._all_signal_data[full_name]) > self.MAX_STORED_SIGNALS:
-                self._all_signal_data[full_name] = self._all_signal_data[full_name][
-                    -self.MAX_STORED_SIGNALS :
-                ]
-
-            # Update data time range (relative times)
-            if rel_timestamp < self._data_time_min:
-                self._data_time_min = rel_timestamp
-            if rel_timestamp > self._data_time_max:
-                self._data_time_max = rel_timestamp
-
-            if full_name not in self._active_signals:
-                continue
-
-            row = self._rows.get(full_name)
-            if not row:
-                continue
-
-            if full_name in self._last_values:
-                last_ts, last_val = self._last_values[full_name]
-
-                if abs(value - last_val) > 0.0001:
-                    row.add_segment(rel_timestamp, rel_timestamp + 0.01, value)
-                else:
-                    row.update_last_segment(rel_timestamp)
-            else:
-                row.add_segment(rel_timestamp, rel_timestamp + 0.01, value)
-
-            self._last_values[full_name] = (rel_timestamp, value)
-
-        if not self._is_running and self._active_signals:
-            self._request_view_update()
-
     def _request_view_update(self) -> None:
-        """Request a throttled view update (prevents UI blocking during streaming)."""
+        """Request a throttled view update."""
         if not self._view_update_pending:
             self._view_update_pending = True
             self._view_update_timer.start()
@@ -1118,9 +1143,8 @@ class StateDiagramWidget(QWidget):
         self._fit_view_to_data()
 
     def _fit_view_to_data(self) -> None:
-        """Fit the view to show all data (relative time starting from 0)."""
+        """Fit the view to show all data."""
         if self._data_time_max > 0:
-            # Start from 0, add small padding at end
             padding = self._data_time_max * 0.05
             self._view_time_min = 0.0
             self._view_time_max = self._data_time_max + padding
@@ -1147,7 +1171,6 @@ class StateDiagramWidget(QWidget):
 
         self._is_running = True
 
-        # Start from 0 if at end or before start
         if (
             self._playback_position >= self._data_time_max
             or self._playback_position < 0
@@ -1159,7 +1182,6 @@ class StateDiagramWidget(QWidget):
 
         self._control_panel.set_running(True)
         self._playback_timer.start()
-        logger.info(f"Playback started at {self._playback_position:.3f}s")
 
     def _on_stop(self):
         """Stop playback."""
@@ -1167,13 +1189,11 @@ class StateDiagramWidget(QWidget):
         self._playback_timer.stop()
         self._control_panel.set_running(False)
         self._set_cursor(None)
-        logger.info("Playback stopped")
 
     def _on_reset(self):
         """Reset playback and clear data."""
         self._on_stop()
         self.clear_data()
-        logger.info("State diagram reset")
 
     def _on_speed_changed(self, speed: float):
         """Handle playback speed change."""
@@ -1196,7 +1216,6 @@ class StateDiagramWidget(QWidget):
         self._view_time_min = self._playback_position - cursor_offset
         self._view_time_max = self._view_time_min + self._view_window_size
 
-        # Clamp to start at 0
         if self._view_time_min < 0:
             self._view_time_min = 0
             self._view_time_max = self._view_window_size
@@ -1205,7 +1224,6 @@ class StateDiagramWidget(QWidget):
         self._time_header.set_time_range(self._view_time_min, self._view_time_max)
         self._set_cursor(self._playback_position)
 
-        # Show duration (data_time_max is already relative, starting from 0)
         self._control_panel.set_playback_time(
             self._playback_position, self._data_time_max
         )
@@ -1222,9 +1240,8 @@ class StateDiagramWidget(QWidget):
             row.clear()
 
         self._last_values.clear()
-        self._all_signal_data.clear()
-        self._time_offset = 0.0
-        self._time_offset_set = False
+        self._last_loaded_ts.clear()
+        self._time_offset = None
         self._data_time_min = 0.0
         self._data_time_max = 0.0
         self._view_time_min = 0.0
@@ -1244,17 +1261,7 @@ class StateDiagramWidget(QWidget):
             row.deleteLater()
 
         self._rows.clear()
-        self._last_values.clear()
-        self._all_signal_data.clear()
-        self._time_offset = 0.0
-        self._time_offset_set = False
-        self._data_time_min = 0.0
-        self._data_time_max = 0.0
-        self._view_time_min = 0.0
-        self._view_time_max = 10.0
-        self._playback_position = 0.0
+        self.clear_data()
 
         self._empty_label.setVisible(True)
         self._control_panel.set_signals([])
-        self._time_header.set_time_range(0, 10)
-        self._time_header.set_cursor(None)

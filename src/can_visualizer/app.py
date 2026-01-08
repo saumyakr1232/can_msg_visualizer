@@ -186,7 +186,7 @@ class MainWindow(QMainWindow):
         self._tabs.addTab(self._signal_plot_tab, "📈 Signal Plot")
 
         # State Diagram Tab (with built-in control panel)
-        self._state_diagram = StateDiagramWidget()
+        self._state_diagram = StateDiagramWidget(data_store=self._data_store)
         self._tabs.addTab(self._state_diagram, "📊 State Diagram")
 
         main_layout.addWidget(self._tabs)
