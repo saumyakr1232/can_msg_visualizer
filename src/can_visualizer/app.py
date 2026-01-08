@@ -52,7 +52,7 @@ logger = get_logger("app")
 class SignalPlotTab(QWidget):
     """Signal Plot tab with its own left panel for DBC browser."""
 
-    def __init__(self, parent=None):
+    def __init__(self, data_store: DataStore, parent=None):
         super().__init__(parent)
 
         layout = QHBoxLayout(self)
@@ -112,7 +112,7 @@ class SignalPlotTab(QWidget):
         self._splitter.addWidget(left_panel)
 
         # Right panel - Plot
-        self.plot_widget = PlotWidget()
+        self.plot_widget = PlotWidget(data_store=data_store)
         self._splitter.addWidget(self.plot_widget)
 
         # Set splitter proportions
@@ -182,7 +182,7 @@ class MainWindow(QMainWindow):
         self._tabs.addTab(self._log_table, "📋 Message Log")
 
         # Signal Plot Tab (with DBC browser)
-        self._signal_plot_tab = SignalPlotTab()
+        self._signal_plot_tab = SignalPlotTab(data_store=self._data_store)
         self._tabs.addTab(self._signal_plot_tab, "📈 Signal Plot")
 
         # State Diagram Tab (with built-in control panel)
@@ -723,7 +723,7 @@ class MainWindow(QMainWindow):
         """Handle decoded signal batch."""
         # Route to widgets
         self._log_table.new_data()
-        # self._plot_widget.new_data()
+        self._plot_widget.new_data()
         # self._state_diagram.new_data()
 
         # # Update fullscreen window if open

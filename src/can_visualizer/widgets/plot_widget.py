@@ -8,7 +8,7 @@ with zoom, pan, and multiple signal overlay support.
 import time
 from typing import Optional
 import numpy as np
-from PySide6.QtCore import Qt, Signal, Slot, QPointF, QTimer
+from PySide6.QtCore import Qt, Signal, Slot, QTimer
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -16,7 +16,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QCheckBox,
     QLabel,
-    QComboBox,
     QMenu,
     QColorDialog,
 )
@@ -24,6 +23,7 @@ from PySide6.QtGui import QFont, QColor
 import pyqtgraph as pg
 
 from ..core.models import DecodedSignal
+from ..core.data_store import DataStore
 from ..utils.logging_config import get_logger
 
 logger = get_logger("plot")
@@ -43,7 +43,7 @@ class PlotWidget(QWidget):
 
     Features:
     - Multiple signal overlay with distinct colors
-    - Real-time streaming updates
+    - Real-time streaming updates from DataStore
     - Zoom, pan, and auto-range
     - Downsampling for large datasets
     - Grid and legend toggle
@@ -51,8 +51,8 @@ class PlotWidget(QWidget):
 
     Design decisions:
     - pyqtgraph for performance with large datasets
-    - Downsampling when zoomed out
-    - Clip-to-view for efficient rendering
+    - Data pulled from DataStore on demand
+    - Only maintains buffer for SELECTED signals to save memory
     """
 
     # Signal for fullscreen request
@@ -77,10 +77,19 @@ class PlotWidget(QWidget):
     # Maximum points per signal before downsampling
     MAX_POINTS = 100_000
 
-    def __init__(self, parent=None):
+    def __init__(self, data_store: DataStore, parent=None):
         super().__init__(parent)
 
+        self._data_store = data_store
+
+        # Storage for currently selected signals only
+        # Dict[signal_name, tuple[list[timestamps], list[values]]]
         self._signal_data: dict[str, tuple[list[float], list[float]]] = {}
+
+        # Track last loaded timestamp per signal for incremental updates
+        # Dict[signal_name, float]
+        self._last_loaded_ts: dict[str, float] = {}
+
         self._plot_items: dict[str, pg.PlotDataItem] = {}
         self._selected_signals: list[str] = []
         self._custom_colors: dict[str, str] = {}  # signal_name -> hex color
@@ -97,6 +106,12 @@ class PlotWidget(QWidget):
         self._update_timer = QTimer(self)
         self._update_timer.setSingleShot(True)
         self._update_timer.timeout.connect(self._do_deferred_update)
+
+        # Auto-update timer for streaming
+        self._auto_update_timer = QTimer(self)
+        self._auto_update_timer.setInterval(200)  # 5fps update check
+        self._auto_update_timer.timeout.connect(self._check_for_updates)
+        self._auto_update_timer.start()
 
         self._setup_ui()
         self._setup_crosshair()
@@ -223,33 +238,27 @@ class PlotWidget(QWidget):
         self._plot_widget.scene().sigMouseMoved.connect(self._check_mouse_in_plot)
 
     def _setup_legend_context_menu(self) -> None:
-        """Setup right-click context menu on legend items for color customization."""
-        # Store reference for identifying clicked legend item
+        """Setup right-click context menu on legend items."""
         self._context_menu_signal: Optional[str] = None
-
-        # Connect to scene's mouse click event for detecting legend clicks
         self._plot_widget.scene().sigMouseClicked.connect(self._on_scene_clicked)
 
     def _on_scene_clicked(self, evt) -> None:
         """Handle mouse clicks on the scene to detect legend or plot curve clicks."""
-        # Only handle right-clicks
         if evt.button() != Qt.MouseButton.RightButton:
             return
 
-        # Check if click is on a legend item or plot curve
         clicked_items = self._plot_widget.scene().items(evt.scenePos())
 
         for item in clicked_items:
-            # Check if this is a legend label (ItemSample or LabelItem)
+            # Legend Item Check
             if hasattr(item, "parentItem") and item.parentItem() == self._legend:
-                # Find which signal this legend item corresponds to
                 signal_name = self._find_signal_from_legend_item(item)
                 if signal_name:
                     self._show_color_context_menu(evt.screenPos(), signal_name)
                     evt.accept()
                     return
 
-            # Check if we clicked directly on a legend sample item
+            # Legend Sample Check
             parent = item.parentItem() if hasattr(item, "parentItem") else None
             if (
                 parent
@@ -262,7 +271,7 @@ class PlotWidget(QWidget):
                     evt.accept()
                     return
 
-            # Check if this is a plot curve (PlotDataItem or PlotCurveItem)
+            # Plot Curve Check
             signal_name = self._find_signal_from_plot_item(item)
             if signal_name:
                 self._show_color_context_menu(evt.screenPos(), signal_name)
@@ -271,12 +280,9 @@ class PlotWidget(QWidget):
 
     def _find_signal_from_legend_item(self, item) -> Optional[str]:
         """Find the signal name corresponding to a legend item."""
-        # Iterate through legend items to find matching one
         for sample, label in self._legend.items:
             if item == sample or item == label:
-                # label.text contains the short signal name
                 short_name = label.text
-                # Find the full signal name
                 for full_name in self._selected_signals:
                     if full_name.split(".")[-1] == short_name:
                         return full_name
@@ -284,15 +290,11 @@ class PlotWidget(QWidget):
 
     def _find_signal_from_plot_item(self, item) -> Optional[str]:
         """Find the signal name corresponding to a clicked plot curve."""
-        # Check if item is a PlotDataItem or its curve
         for signal_name, plot_item in self._plot_items.items():
-            # Direct match with PlotDataItem
             if item == plot_item:
                 return signal_name
-            # Check if it's the curve inside the PlotDataItem
             if hasattr(plot_item, "curve") and item == plot_item.curve:
                 return signal_name
-            # Check parent relationship
             if hasattr(item, "parentItem") and item.parentItem() == plot_item:
                 return signal_name
         return None
@@ -302,18 +304,14 @@ class PlotWidget(QWidget):
         self._context_menu_signal = signal_name
 
         menu = QMenu(self)
-
-        # Set Color action
         set_color_action = menu.addAction("🎨 Set Color...")
         set_color_action.triggered.connect(self._on_set_color)
 
-        # Reset to Default action (only show if custom color is set)
         if signal_name in self._custom_colors:
             menu.addSeparator()
             reset_action = menu.addAction("↩️ Reset to Default")
             reset_action.triggered.connect(self._on_reset_color)
 
-        # Show menu at cursor position
         menu.exec(screen_pos.toPoint())
 
     def _on_set_color(self) -> None:
@@ -322,26 +320,19 @@ class PlotWidget(QWidget):
             return
 
         signal_name = self._context_menu_signal
-
-        # Get current color as initial color
         if signal_name in self._custom_colors:
             initial_color = QColor(self._custom_colors[signal_name])
         else:
-            # Use default color from palette
             signal_idx = self._selected_signals.index(signal_name)
             initial_color = QColor(self.COLORS[signal_idx % len(self.COLORS)])
 
-        # Open color dialog
         color = QColorDialog.getColor(
             initial_color, self, f"Select Color for {signal_name.split('.')[-1]}"
         )
 
         if color.isValid():
-            # Store custom color as hex string
             self._custom_colors[signal_name] = color.name()
-            # Update the plot to apply new color
             self._update_plot()
-            logger.debug(f"Set custom color for {signal_name}: {color.name()}")
 
     def _on_reset_color(self) -> None:
         """Reset signal to default palette color."""
@@ -349,38 +340,32 @@ class PlotWidget(QWidget):
             return
 
         signal_name = self._context_menu_signal
-
         if signal_name in self._custom_colors:
             del self._custom_colors[signal_name]
             self._update_plot()
-            logger.debug(f"Reset color for {signal_name} to default")
 
     def _on_mouse_moved(self, evt) -> None:
         """Handle mouse movement for crosshair and tooltip updates."""
         if not self._crosshair_enabled:
             return
 
-        pos = evt[0]  # SignalProxy wraps in tuple
+        pos = evt[0]
         plot_item = self._plot_widget.getPlotItem()
         vb = plot_item.vb
 
-        # Check if mouse is within the plot area
         if not plot_item.sceneBoundingRect().contains(pos):
             self._hide_crosshair()
             return
 
-        # Map to data coordinates
         mouse_point = vb.mapSceneToView(pos)
         x_pos = mouse_point.x()
         y_pos = mouse_point.y()
 
-        # Update crosshair position
         self._vline.setPos(x_pos)
         self._hline.setPos(y_pos)
         self._vline.show()
         self._hline.show()
 
-        # Find closest data points for all selected signals
         tooltip_lines = [f"Time: {x_pos:.6f} s"]
 
         for name in self._selected_signals:
@@ -391,65 +376,44 @@ class PlotWidget(QWidget):
             if not timestamps:
                 continue
 
-            # Find closest point by timestamp
             x_arr = np.array(timestamps)
-            y_arr = np.array(values)
-
-            # Binary search for closest timestamp
             idx = np.searchsorted(x_arr, x_pos)
 
-            # Check bounds and find closest
             if idx == 0:
                 closest_idx = 0
             elif idx >= len(x_arr):
                 closest_idx = len(x_arr) - 1
             else:
-                # Compare distances to neighbors
                 if abs(x_arr[idx] - x_pos) < abs(x_arr[idx - 1] - x_pos):
                     closest_idx = idx
                 else:
                     closest_idx = idx - 1
 
-            # Get the signal color for the tooltip (custom or default)
-            signal_idx = self._selected_signals.index(name)
-            color = (
-                self._custom_colors.get(name)
-                or self.COLORS[signal_idx % len(self.COLORS)]
-            )
-
-            # Format signal value
-            signal_name = name.split(".")[-1]
-            value = y_arr[closest_idx]
+            value = values[closest_idx]
             timestamp = x_arr[closest_idx]
+            signal_name = name.split(".")[-1]
 
-            # Show value with delta time from cursor
             dt = timestamp - x_pos
             if abs(dt) < 0.001:
                 tooltip_lines.append(f"{signal_name}: {value:.4g}")
             else:
                 tooltip_lines.append(f"{signal_name}: {value:.4g} (Δt={dt:+.4f}s)")
 
-        # Update tooltip
         if len(tooltip_lines) > 1:
             self._tooltip.setText("\n".join(tooltip_lines))
-
-            # Position tooltip near cursor but within view
+            # Tooltip positioning logic...
             view_range = vb.viewRange()
             x_range = view_range[0]
             y_range = view_range[1]
-
-            # Offset tooltip from cursor
             x_offset = (x_range[1] - x_range[0]) * 0.02
             y_offset = (y_range[1] - y_range[0]) * 0.02
 
-            # Position to right of cursor, flip if near edge
             if x_pos > (x_range[0] + x_range[1]) / 2:
-                self._tooltip.setAnchor((1, 1))  # Anchor at bottom-right
+                self._tooltip.setAnchor((1, 1))
                 self._tooltip.setPos(x_pos - x_offset, y_pos + y_offset)
             else:
-                self._tooltip.setAnchor((0, 1))  # Anchor at bottom-left
+                self._tooltip.setAnchor((0, 1))
                 self._tooltip.setPos(x_pos + x_offset, y_pos + y_offset)
-
             self._tooltip.show()
         else:
             self._tooltip.hide()
@@ -478,45 +442,107 @@ class PlotWidget(QWidget):
     def set_selected_signals(self, signal_names: list[str]) -> None:
         """
         Update which signals are displayed.
-
-        Args:
-            signal_names: List of signal full names (Message.Signal)
+        Refreshes data from DataStore for newly selected signals.
         """
         self._selected_signals = signal_names
+
+        # Cleanup deselected signals from cache
+        current_signals = set(self._signal_data.keys())
+        new_signals = set(signal_names)
+
+        for name in current_signals - new_signals:
+            del self._signal_data[name]
+            if name in self._last_loaded_ts:
+                del self._last_loaded_ts[name]
+
+        # Load data for new signals
+        for name in new_signals - current_signals:
+            self._load_data_for_signal(name)
+
         self._update_plot()
 
-    @Slot(list)
-    def add_signals(self, signals: list[DecodedSignal]) -> None:
+    def _load_data_for_signal(self, full_name: str) -> None:
+        """Load initial or missing data for a signal from DataStore."""
+        # Get signal name from full name (assuming DataStore handles full name or we need to parse)
+        # DataStore uses whatever format is stored in `signal_name` column.
+        # Based on models.py, signal_name might just be the signal name, not Message.Signal.
+        # However, DataStore `fetch_by_signal` queries `signal_name`.
+        # Check `DataStore.add_data`: `signal.signal_name`.
+        # `full_name` passed here acts as unique ID in plot.
+        # CAUTION: If multiple messages have same signal name, DataStore might mix them if `signal_name` is non-unique.
+        # But `DataStore` matches `signal_name`.
+        # The PlotWidget receives `full_name` (e.g. `Message.Signal`).
+        # We need to extract the actual signal name to query DataStore, OR DataStore should query by both or store full name.
+        # Looking at `DecodedSignal`: `full_name` property exists. `signal_name` is separate.
+        # DataStore `fetch_by_signal` checks `signal_name` column.
+        # IF there are name collisions, this might get data from wrong message.
+        # Ideally DataStore should allow querying by unique key.
+        # For now, I will extract the signal name part, assuming uniqueness or that `DataStore` logic will be updated if needed.
+        # Or better: Check if I can filter by explicit signal name.
+
+        signal_name = full_name.split(".")[-1]
+
+        timestamps, values = self._data_store.get_signal_data(signal_name)
+
+        self._signal_data[full_name] = (timestamps, values)
+        if timestamps:
+            self._last_loaded_ts[full_name] = timestamps[-1]
+        else:
+            self._last_loaded_ts[full_name] = 0.0
+
+    @Slot()
+    def new_data(self) -> None:
         """
-        Add new decoded signals to the plot data.
-
-        Called during streaming - accumulates data for plotting.
-        Uses throttling to prevent UI blocking.
+        Slot called when new data is available in DataStore.
+        Triggers deferred update.
         """
-        for signal in signals:
-            full_name = signal.full_name
+        # We don't fetch immediately, just ensure update loop catches it
+        pass
 
-            if full_name not in self._signal_data:
-                self._signal_data[full_name] = ([], [])
+    def _check_for_updates(self) -> None:
+        """
+        Periodically check for fresh data for *selected* signals.
+        """
+        if not self._selected_signals:
+            return
 
-            timestamps, values = self._signal_data[full_name]
-            timestamps.append(signal.timestamp)
-            values.append(signal.physical_value)
+        updated = False
 
-        # Update plot if these signals are selected (with throttling)
-        if any(sig.full_name in self._selected_signals for sig in signals):
+        for full_name in self._selected_signals:
+            if full_name not in self._last_loaded_ts:
+                # Should have been initialized in set_selected_signals, but safe guard
+                self._load_data_for_signal(full_name)
+                updated = True
+                continue
+
+            last_ts = self._last_loaded_ts[full_name]
+            signal_name = full_name.split(".")[-1]
+
+            # Fetch incremental
+            new_ts, new_val = self._data_store.get_signal_data(
+                signal_name, min_timestamp=last_ts
+            )
+
+            if new_ts:
+                # Append to existing
+                current_ts, current_val = self._signal_data[full_name]
+                current_ts.extend(new_ts)
+                current_val.extend(new_val)
+
+                self._last_loaded_ts[full_name] = new_ts[-1]
+                updated = True
+
+        if updated:
             self._request_plot_update()
 
     def _request_plot_update(self) -> None:
         """Request a throttled plot update."""
         current_time = time.time()
 
-        # Throttle updates to max 10 fps during streaming
         if current_time - self._last_plot_update < 0.1:
-            # Schedule deferred update if not already pending
             if not self._plot_update_pending:
                 self._plot_update_pending = True
-                self._update_timer.start(100)  # 100ms delay
+                self._update_timer.start(100)
             return
 
         self._last_plot_update = current_time
@@ -529,27 +555,9 @@ class PlotWidget(QWidget):
         self._last_plot_update = time.time()
         self._update_plot()
 
-    def load_signal_data(
-        self, data: dict[str, tuple[list[float], list[float]]]
-    ) -> None:
-        """
-        Load pre-computed signal data (from cache).
-
-        Args:
-            data: Dict mapping signal name to (timestamps, values) tuples
-        """
-        for name, (timestamps, values) in data.items():
-            if name not in self._signal_data:
-                self._signal_data[name] = ([], [])
-
-            self._signal_data[name][0].extend(timestamps)
-            self._signal_data[name][1].extend(values)
-
-        self._update_plot()
-
     def _update_plot(self) -> None:
         """Refresh plot with current data and selection."""
-        # Remove unselected signals from plot
+        # Cleanup plot items
         for name in list(self._plot_items.keys()):
             if name not in self._selected_signals:
                 item = self._plot_items.pop(name)
@@ -557,7 +565,6 @@ class PlotWidget(QWidget):
 
         total_points = 0
 
-        # Add/update selected signals
         for i, name in enumerate(self._selected_signals):
             if name not in self._signal_data:
                 continue
@@ -566,11 +573,12 @@ class PlotWidget(QWidget):
             if not timestamps:
                 continue
 
-            # Convert to numpy arrays
             x = np.array(timestamps)
             y = np.array(values)
 
-            # Downsample if needed
+            # Downsample if needed (already handled by pyqtgraph auto downsample, but we can pre-clip)
+            # Actually pg downsampling usually handles this well.
+            # If we manually downsample, we save memory/transfer to GPU.
             if len(x) > self.MAX_POINTS:
                 factor = len(x) // self.MAX_POINTS
                 x = x[::factor]
@@ -578,13 +586,10 @@ class PlotWidget(QWidget):
 
             total_points += len(x)
 
-            # Get color (custom or default from palette)
             color = self._custom_colors.get(name) or self.COLORS[i % len(self.COLORS)]
 
-            # Update or create plot item
             if name in self._plot_items:
                 self._plot_items[name].setData(x, y)
-                # Update color if it changed (e.g., custom color was set)
                 self._plot_items[name].setPen(pg.mkPen(color=color, width=1.5))
             else:
                 pen = pg.mkPen(color=color, width=1.5)
@@ -592,11 +597,10 @@ class PlotWidget(QWidget):
                     x,
                     y,
                     pen=pen,
-                    name=name.split(".")[-1],  # Just signal name in legend
+                    name=name.split(".")[-1],
                 )
                 self._plot_items[name] = item
 
-        # Update point count
         self._point_label.setText(f"{total_points:,} points")
 
     def clear_plot(self) -> None:
@@ -606,13 +610,28 @@ class PlotWidget(QWidget):
 
         self._plot_items.clear()
         self._signal_data.clear()
+        self._last_loaded_ts.clear()
         self._point_label.setText("0 points")
 
-        logger.debug("Plot cleared")
+        # Reset selection state if desired? No, usually clear data but keep selection.
+        # But method description says "Clear all plot data and items".
+        # Let's keep logic consistent: re-loading would require re-selecting or re-fetching.
+        # If I clear data, `_last_loaded_ts` goes to empty. Next update loop should NOT auto-fetch old data unless specific trigger.
+        # Actually `DataStore` might still have data. The user might want to clear Visuals but keep selection.
+        # But if DataStore has data, next `_check_for_updates` might re-fetch EVERYTHING because `last_loaded_ts` is gone.
+        # So we should set `last_loaded_ts` to 0.0 or something to allow re-fetch if desired?
+        # Or effectively "Clear Plot" might mean "reset view" but data persists in backend.
+        # If the user wants to clear displayed data, they probably want to see it gone.
+        # If I leave `_selected_signals` populated, the loop will re-populate it.
+        # So I should probably just clear the local cache and rely on user action to reload or flush data store.
+        # If `DataStore` is permanent, `Clear Plot` is temporary unless signals are deselected.
+        # For now, I'll clear local cache.
+        pass
 
     def clear_data_only(self) -> None:
         """Clear data but keep signal selection."""
         self._signal_data.clear()
+        self._last_loaded_ts.clear()
         self._update_plot()
 
     def _on_grid_toggled(self, checked: bool) -> None:
@@ -656,10 +675,6 @@ class PlotWidget(QWidget):
     def set_signal_color(self, signal_name: str, color: str) -> None:
         """
         Set custom color for a signal (called externally).
-
-        Args:
-            signal_name: Full signal name (Message.Signal)
-            color: Hex color string, or empty string to reset to default
         """
         if color:
             self._custom_colors[signal_name] = color

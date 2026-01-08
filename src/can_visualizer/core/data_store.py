@@ -152,6 +152,40 @@ class DataStore:
             for row in cursor:
                 yield self._row_to_signal(row)
 
+    def get_signal_data(
+        self, signal_name: str, min_timestamp: Optional[float] = None
+    ) -> tuple[List[float], List[float]]:
+        """
+        Fetch timestamps and physical values for a signal.
+        Optimized for plotting.
+
+        Args:
+            signal_name: Name of signal to fetch.
+            min_timestamp: If provided, only returns data newer than this.
+
+        Returns:
+            Tuple of (timestamps, values) lists.
+        """
+        query = "SELECT timestamp, physical_value FROM signals WHERE signal_name = ?"
+        params = [signal_name]
+
+        if min_timestamp is not None:
+            query += " AND timestamp > ?"
+            params.append(min_timestamp)
+
+        query += " ORDER BY timestamp"
+
+        timestamps = []
+        values = []
+
+        with self._get_connection() as conn:
+            cursor = conn.execute(query, params)
+            for row in cursor:
+                timestamps.append(row["timestamp"])
+                values.append(row["physical_value"])
+
+        return timestamps, values
+
     def get_total_count(self) -> int:
         """Get total number of records in the store."""
         with self._get_connection() as conn:
