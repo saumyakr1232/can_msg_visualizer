@@ -1,0 +1,38 @@
+VERSION ""
+
+NS_ :
+
+BS_:
+
+BU_: ECU1 ECU2
+
+BO_ 256 EngineData: 8 ECU1
+ SG_ EngineSpeed : 0|16@1+ (0.25,0) [0|16383.75] "rpm" Vector__XXX
+ SG_ ThrottlePosition : 16|8@1+ (0.392157,0) [0|100] "%" Vector__XXX
+ SG_ EngineTemp : 24|8@1+ (1,-40) [-40|215] "degC" Vector__XXX
+ SG_ EngineState : 32|3@1+ (1,0) [0|7] "" Vector__XXX
+
+BO_ 512 VehicleData: 8 ECU1
+ SG_ VehicleSpeed : 0|16@1+ (0.01,0) [0|655.35] "km/h" Vector__XXX
+ SG_ BrakePedal : 16|8@1+ (0.392157,0) [0|100] "%" Vector__XXX
+ SG_ GearPosition : 24|4@1+ (1,0) [0|15] "" Vector__XXX
+ SG_ TurnSignal : 28|2@1+ (1,0) [0|3] "" Vector__XXX
+
+BO_ 768 BatteryData: 8 ECU2
+ SG_ BatteryVoltage : 0|16@1+ (0.01,0) [0|655.35] "V" Vector__XXX
+ SG_ BatteryCurrent : 16|16@1- (0.1,0) [-3276.8|3276.7] "A" Vector__XXX
+ SG_ BatteryTemp : 32|8@1+ (1,-40) [-40|215] "degC" Vector__XXX
+ SG_ BatterySOC : 40|8@1+ (0.5,0) [0|100] "%" Vector__XXX
+
+VAL_ 256 EngineState 0 "Off" 1 "Cranking" 2 "Running" 3 "Idle" 4 "Shutdown" ;
+VAL_ 512 GearPosition 0 "Park" 1 "Reverse" 2 "Neutral" 3 "Drive" 4 "Low" ;
+VAL_ 512 TurnSignal 0 "Off" 1 "Left" 2 "Right" 3 "Hazard" ;
+
+CM_ BO_ 256 "Engine control unit data message";
+CM_ BO_ 512 "Vehicle dynamics data message";
+CM_ BO_ 768 "Battery management system data";
+CM_ SG_ 256 EngineSpeed "Engine rotational speed in RPM";
+CM_ SG_ 256 ThrottlePosition "Accelerator pedal position percentage";
+CM_ SG_ 512 VehicleSpeed "Current vehicle speed";
+CM_ SG_ 768 BatterySOC "State of charge percentage";
+

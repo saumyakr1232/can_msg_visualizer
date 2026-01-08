@@ -1,0 +1,150 @@
+"""
+CAN file parser for BLF and ASC formats.
+
+Uses python-can library to read CAN trace files.
+Designed for streaming large files without loading all into memory.
+"""
+
+import os
+from pathlib import Path
+from typing import Iterator, Optional
+import can
+
+from ..utils.logging_config import get_logger
+from .models import CANMessage
+
+logger = get_logger("parser")
+
+
+class CANParser:
+    """
+    Parser for CAN trace files (BLF, ASC formats).
+    
+    Provides streaming iteration over messages for memory efficiency
+    with large files. Supports file size estimation for progress tracking.
+    """
+    
+    SUPPORTED_EXTENSIONS = {".blf", ".asc"}
+    
+    def __init__(self, file_path: Path | str):
+        """
+        Initialize parser with file path.
+        
+        Args:
+            file_path: Path to BLF or ASC file
+            
+        Raises:
+            FileNotFoundError: If file doesn't exist
+            ValueError: If file extension is not supported
+        """
+        self.file_path = Path(file_path)
+        
+        if not self.file_path.exists():
+            raise FileNotFoundError(f"CAN trace file not found: {self.file_path}")
+        
+        suffix = self.file_path.suffix.lower()
+        if suffix not in self.SUPPORTED_EXTENSIONS:
+            raise ValueError(
+                f"Unsupported file format: {suffix}. "
+                f"Supported: {', '.join(self.SUPPORTED_EXTENSIONS)}"
+            )
+        
+        self._file_size = self.file_path.stat().st_size
+        self._estimated_count: Optional[int] = None
+        
+        logger.info(f"Initialized parser for: {self.file_path.name}")
+        logger.info(f"File size: {self._file_size / (1024*1024):.2f} MB")
+    
+    @property
+    def file_size_mb(self) -> float:
+        """Return file size in megabytes."""
+        return self._file_size / (1024 * 1024)
+    
+    def estimate_message_count(self) -> int:
+        """
+        Estimate total message count for progress indication.
+        
+        Uses file size heuristics:
+        - BLF: ~100 bytes per message average
+        - ASC: ~80 bytes per line average
+        
+        Returns:
+            Estimated number of CAN messages
+        """
+        if self._estimated_count is not None:
+            return self._estimated_count
+        
+        suffix = self.file_path.suffix.lower()
+        
+        if suffix == ".blf":
+            # BLF binary format: roughly 100 bytes per message
+            bytes_per_msg = 100
+        else:
+            # ASC text format: roughly 80 chars per line
+            bytes_per_msg = 80
+        
+        self._estimated_count = max(1, self._file_size // bytes_per_msg)
+        logger.debug(f"Estimated message count: {self._estimated_count}")
+        
+        return self._estimated_count
+    
+    def iterate_messages(self) -> Iterator[CANMessage]:
+        """
+        Stream CAN messages from file.
+        
+        Generator that yields CANMessage objects one at a time.
+        Memory efficient for large files.
+        
+        Yields:
+            CANMessage for each valid message in the file
+        """
+        logger.info(f"Starting to parse: {self.file_path.name}")
+        
+        message_count = 0
+        error_count = 0
+        
+        try:
+            # python-can auto-detects format from extension
+            with can.LogReader(str(self.file_path)) as reader:
+                for msg in reader:
+                    try:
+                        # Skip error frames and remote frames
+                        if msg.is_error_frame or msg.is_remote_frame:
+                            continue
+                        
+                        can_msg = CANMessage(
+                            timestamp=msg.timestamp,
+                            arbitration_id=msg.arbitration_id,
+                            data=bytes(msg.data),
+                            is_extended_id=msg.is_extended_id,
+                            channel=msg.channel if hasattr(msg, 'channel') else 0,
+                        )
+                        
+                        message_count += 1
+                        yield can_msg
+                        
+                    except Exception as e:
+                        error_count += 1
+                        if error_count <= 10:  # Limit error logging
+                            logger.warning(f"Error reading message: {e}")
+                            
+        except Exception as e:
+            logger.error(f"Fatal error reading file: {e}")
+            raise
+        
+        logger.info(
+            f"Parsing complete: {message_count} messages, {error_count} errors"
+        )
+    
+    def get_cache_key(self) -> str:
+        """
+        Generate unique cache key for this file.
+        
+        Uses file path, size, and modification time to detect changes.
+        
+        Returns:
+            Unique string identifier for caching
+        """
+        stat = self.file_path.stat()
+        return f"{self.file_path.name}_{stat.st_size}_{stat.st_mtime_ns}"
+
