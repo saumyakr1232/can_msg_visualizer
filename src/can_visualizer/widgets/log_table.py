@@ -346,9 +346,10 @@ class MessageLogFilterPanel(QFrame):
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(8)
         
-        # Add filter button
-        self._add_btn = QPushButton("➕ Add Filter")
+        # Add signal button
+        self._add_btn = QPushButton("➕ Add Signal")
         self._add_btn.setMinimumHeight(36)
+        self._add_btn.setToolTip("Add signals to filter the message log")
         self._add_btn.clicked.connect(self.add_filter_requested.emit)
         layout.addWidget(self._add_btn)
         
@@ -391,10 +392,22 @@ class MessageLogFilterPanel(QFrame):
         layout.addWidget(self._status_label)
     
     def set_filter_signals(self, signal_names: list[str]):
-        """Set the list of signals to filter by."""
+        """Set the list of signals to filter by (replaces existing)."""
         self._filter_signals = list(signal_names)
         self._update_list()
         self.filter_changed.emit(self._filter_signals)
+    
+    def add_filter_signals(self, signal_names: list[str]):
+        """Add signals to the existing filter (does not replace)."""
+        for name in signal_names:
+            if name not in self._filter_signals:
+                self._filter_signals.append(name)
+        self._update_list()
+        self.filter_changed.emit(self._filter_signals)
+    
+    def get_filter_signals(self) -> list[str]:
+        """Get the current list of filter signals."""
+        return list(self._filter_signals)
     
     def _update_list(self):
         """Update the filters list widget."""
@@ -691,8 +704,16 @@ class LogTableWidget(QWidget):
         self._update_load_all_button()
     
     def set_signal_filter(self, signal_names: list[str]) -> None:
-        """Set filter by specific signal full names."""
+        """Set filter by specific signal full names (replaces existing)."""
         self._filter_panel.set_filter_signals(signal_names)
+    
+    def add_signal_filter(self, signal_names: list[str]) -> None:
+        """Add signals to the existing filter (does not replace)."""
+        self._filter_panel.add_filter_signals(signal_names)
+    
+    def get_signal_filter(self) -> list[str]:
+        """Get the current list of filter signals."""
+        return self._filter_panel.get_filter_signals()
     
     def _on_filter_changed(self, text: str) -> None:
         """Handle filter text changes."""

@@ -17,8 +17,10 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QLabel,
     QComboBox,
+    QMenu,
+    QColorDialog,
 )
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QFont, QColor
 import pyqtgraph as pg
 
 from ..core.models import DecodedSignal
@@ -81,6 +83,7 @@ class PlotWidget(QWidget):
         self._signal_data: dict[str, tuple[list[float], list[float]]] = {}
         self._plot_items: dict[str, pg.PlotDataItem] = {}
         self._selected_signals: list[str] = []
+        self._custom_colors: dict[str, str] = {}  # signal_name -> hex color
         
         # Crosshair and tooltip components
         self._vline: Optional[pg.InfiniteLine] = None
@@ -97,6 +100,7 @@ class PlotWidget(QWidget):
         
         self._setup_ui()
         self._setup_crosshair()
+        self._setup_legend_context_menu()
     
     def _setup_ui(self) -> None:
         """Initialize UI components."""
@@ -218,6 +222,137 @@ class PlotWidget(QWidget):
         # Hide crosshair when mouse leaves
         self._plot_widget.scene().sigMouseMoved.connect(self._check_mouse_in_plot)
     
+    def _setup_legend_context_menu(self) -> None:
+        """Setup right-click context menu on legend items for color customization."""
+        # Store reference for identifying clicked legend item
+        self._context_menu_signal: Optional[str] = None
+        
+        # Connect to scene's mouse click event for detecting legend clicks
+        self._plot_widget.scene().sigMouseClicked.connect(self._on_scene_clicked)
+    
+    def _on_scene_clicked(self, evt) -> None:
+        """Handle mouse clicks on the scene to detect legend or plot curve clicks."""
+        # Only handle right-clicks
+        if evt.button() != Qt.MouseButton.RightButton:
+            return
+        
+        # Check if click is on a legend item or plot curve
+        clicked_items = self._plot_widget.scene().items(evt.scenePos())
+        
+        for item in clicked_items:
+            # Check if this is a legend label (ItemSample or LabelItem)
+            if hasattr(item, 'parentItem') and item.parentItem() == self._legend:
+                # Find which signal this legend item corresponds to
+                signal_name = self._find_signal_from_legend_item(item)
+                if signal_name:
+                    self._show_color_context_menu(evt.screenPos(), signal_name)
+                    evt.accept()
+                    return
+            
+            # Check if we clicked directly on a legend sample item
+            parent = item.parentItem() if hasattr(item, 'parentItem') else None
+            if parent and hasattr(parent, 'parentItem') and parent.parentItem() == self._legend:
+                signal_name = self._find_signal_from_legend_item(parent)
+                if signal_name:
+                    self._show_color_context_menu(evt.screenPos(), signal_name)
+                    evt.accept()
+                    return
+            
+            # Check if this is a plot curve (PlotDataItem or PlotCurveItem)
+            signal_name = self._find_signal_from_plot_item(item)
+            if signal_name:
+                self._show_color_context_menu(evt.screenPos(), signal_name)
+                evt.accept()
+                return
+    
+    def _find_signal_from_legend_item(self, item) -> Optional[str]:
+        """Find the signal name corresponding to a legend item."""
+        # Iterate through legend items to find matching one
+        for sample, label in self._legend.items:
+            if item == sample or item == label:
+                # label.text contains the short signal name
+                short_name = label.text
+                # Find the full signal name
+                for full_name in self._selected_signals:
+                    if full_name.split('.')[-1] == short_name:
+                        return full_name
+        return None
+    
+    def _find_signal_from_plot_item(self, item) -> Optional[str]:
+        """Find the signal name corresponding to a clicked plot curve."""
+        # Check if item is a PlotDataItem or its curve
+        for signal_name, plot_item in self._plot_items.items():
+            # Direct match with PlotDataItem
+            if item == plot_item:
+                return signal_name
+            # Check if it's the curve inside the PlotDataItem
+            if hasattr(plot_item, 'curve') and item == plot_item.curve:
+                return signal_name
+            # Check parent relationship
+            if hasattr(item, 'parentItem') and item.parentItem() == plot_item:
+                return signal_name
+        return None
+    
+    def _show_color_context_menu(self, screen_pos, signal_name: str) -> None:
+        """Show context menu for signal color customization."""
+        self._context_menu_signal = signal_name
+        
+        menu = QMenu(self)
+        
+        # Set Color action
+        set_color_action = menu.addAction("🎨 Set Color...")
+        set_color_action.triggered.connect(self._on_set_color)
+        
+        # Reset to Default action (only show if custom color is set)
+        if signal_name in self._custom_colors:
+            menu.addSeparator()
+            reset_action = menu.addAction("↩️ Reset to Default")
+            reset_action.triggered.connect(self._on_reset_color)
+        
+        # Show menu at cursor position
+        menu.exec(screen_pos.toPoint())
+    
+    def _on_set_color(self) -> None:
+        """Open color dialog to set custom signal color."""
+        if not self._context_menu_signal:
+            return
+        
+        signal_name = self._context_menu_signal
+        
+        # Get current color as initial color
+        if signal_name in self._custom_colors:
+            initial_color = QColor(self._custom_colors[signal_name])
+        else:
+            # Use default color from palette
+            signal_idx = self._selected_signals.index(signal_name)
+            initial_color = QColor(self.COLORS[signal_idx % len(self.COLORS)])
+        
+        # Open color dialog
+        color = QColorDialog.getColor(
+            initial_color,
+            self,
+            f"Select Color for {signal_name.split('.')[-1]}"
+        )
+        
+        if color.isValid():
+            # Store custom color as hex string
+            self._custom_colors[signal_name] = color.name()
+            # Update the plot to apply new color
+            self._update_plot()
+            logger.debug(f"Set custom color for {signal_name}: {color.name()}")
+    
+    def _on_reset_color(self) -> None:
+        """Reset signal to default palette color."""
+        if not self._context_menu_signal:
+            return
+        
+        signal_name = self._context_menu_signal
+        
+        if signal_name in self._custom_colors:
+            del self._custom_colors[signal_name]
+            self._update_plot()
+            logger.debug(f"Reset color for {signal_name} to default")
+    
     def _on_mouse_moved(self, evt) -> None:
         """Handle mouse movement for crosshair and tooltip updates."""
         if not self._crosshair_enabled:
@@ -273,9 +408,9 @@ class PlotWidget(QWidget):
                 else:
                     closest_idx = idx - 1
             
-            # Get the signal color for the tooltip
+            # Get the signal color for the tooltip (custom or default)
             signal_idx = self._selected_signals.index(name)
-            color = self.COLORS[signal_idx % len(self.COLORS)]
+            color = self._custom_colors.get(name) or self.COLORS[signal_idx % len(self.COLORS)]
             
             # Format signal value
             signal_name = name.split('.')[-1]
@@ -439,12 +574,14 @@ class PlotWidget(QWidget):
             
             total_points += len(x)
             
-            # Get color
-            color = self.COLORS[i % len(self.COLORS)]
+            # Get color (custom or default from palette)
+            color = self._custom_colors.get(name) or self.COLORS[i % len(self.COLORS)]
             
             # Update or create plot item
             if name in self._plot_items:
                 self._plot_items[name].setData(x, y)
+                # Update color if it changed (e.g., custom color was set)
+                self._plot_items[name].setPen(pg.mkPen(color=color, width=1.5))
             else:
                 pen = pg.mkPen(color=color, width=1.5)
                 item = self._plot_widget.plot(
@@ -510,4 +647,22 @@ class PlotWidget(QWidget):
     def total_points(self) -> int:
         """Get total data points across all signals."""
         return sum(len(v[0]) for v in self._signal_data.values())
+    
+    def set_signal_color(self, signal_name: str, color: str) -> None:
+        """
+        Set custom color for a signal (called externally).
+        
+        Args:
+            signal_name: Full signal name (Message.Signal)
+            color: Hex color string, or empty string to reset to default
+        """
+        if color:
+            self._custom_colors[signal_name] = color
+        elif signal_name in self._custom_colors:
+            del self._custom_colors[signal_name]
+        self._update_plot()
+    
+    def get_custom_colors(self) -> dict[str, str]:
+        """Get all custom color assignments."""
+        return self._custom_colors.copy()
 

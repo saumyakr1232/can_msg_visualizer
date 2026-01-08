@@ -4,11 +4,16 @@ State Diagram Widget - Gantt-Chart Style Timeline.
 Displays CAN signals as horizontal bars over time, similar to CANalyzer's
 state diagram view. Each signal is a row, with bar segments showing
 value changes over time.
+
+Features:
+- Interactive pan/zoom with mouse
+- Hover tooltips showing signal values
+- Playback cursor for timeline animation
 """
 
 from typing import Optional
 import numpy as np
-from PySide6.QtCore import Qt, Signal, Slot, QTimer
+from PySide6.QtCore import Qt, Signal, Slot, QTimer, QPoint
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -23,8 +28,9 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QSlider,
+    QToolTip,
 )
-from PySide6.QtGui import QColor, QFont, QPainter, QPen, QBrush, QFontMetrics
+from PySide6.QtGui import QColor, QFont, QPainter, QPen, QBrush, QFontMetrics, QCursor, QWheelEvent, QMouseEvent
 import pyqtgraph as pg
 
 from ..core.models import DecodedSignal, SignalDefinition
@@ -56,10 +62,19 @@ class StateTimelineRow(QFrame):
     
     Displays horizontal bar segments where each segment represents
     a time period with a constant value.
+    
+    Features:
+    - Hover tooltip showing value at cursor position
+    - Mouse wheel zoom (forwarded to parent)
+    - Drag to pan (forwarded to parent)
     """
     
     ROW_HEIGHT = 50
     LABEL_WIDTH = 120
+    
+    # Signals for interaction
+    wheel_zoom = Signal(float, float)  # (delta, mouse_time_position)
+    drag_pan = Signal(float)  # delta_time
     
     def __init__(self, signal_name: str, signal_def: Optional[SignalDefinition] = None, parent=None):
         super().__init__(parent)
@@ -82,10 +97,18 @@ class StateTimelineRow(QFrame):
         self._value_colors: dict[float, str] = {}
         self._color_index = 0
         
+        # Mouse interaction state
+        self._is_dragging = False
+        self._drag_start_x = 0
+        self._drag_start_time = 0.0
+        
         # Size policy
         self.setFixedHeight(self.ROW_HEIGHT)
         self.setMinimumWidth(300)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        
+        # Enable mouse tracking for hover tooltips
+        self.setMouseTracking(True)
         
         # Style
         self.setStyleSheet("""
@@ -102,7 +125,6 @@ class StateTimelineRow(QFrame):
     
     def get_color_for_value(self, value: float) -> str:
         """Get or assign a color for a value."""
-        # Round to handle floating point
         key = round(value, 6)
         if key not in self._value_colors:
             self._value_colors[key] = STATE_COLORS[self._color_index % len(STATE_COLORS)]
@@ -112,18 +134,17 @@ class StateTimelineRow(QFrame):
     def add_segment(self, start_time: float, end_time: float, value: float) -> None:
         """Add a new segment to this row."""
         color = self.get_color_for_value(value)
-        # Ensure minimum segment duration for visibility
         if end_time <= start_time:
-            end_time = start_time + 0.001  # Minimum 1ms
+            end_time = start_time + 0.001
         self.segments.append((start_time, end_time, value, color))
-        self.repaint()  # Force immediate repaint
+        self.repaint()
     
     def update_last_segment(self, end_time: float) -> None:
         """Extend the last segment's end time."""
         if self.segments:
             start, _, value, color = self.segments[-1]
             self.segments[-1] = (start, end_time, value, color)
-            self.repaint()  # Force immediate repaint
+            self.repaint()
     
     def set_time_range(self, time_min: float, time_max: float) -> None:
         """Set the visible time range for coordinate mapping."""
@@ -153,6 +174,114 @@ class StateTimelineRow(QFrame):
         max_t = max(s[1] for s in self.segments)
         return (min_t, max_t)
     
+    def _x_to_time(self, x: int) -> float:
+        """Convert x pixel coordinate to time value."""
+        timeline_x = self.LABEL_WIDTH + 5
+        timeline_width = self.width() - self.LABEL_WIDTH - 10
+        if timeline_width <= 0:
+            return self.time_min
+        normalized = (x - timeline_x) / timeline_width
+        return self.time_min + normalized * (self.time_max - self.time_min)
+    
+    def _time_to_x(self, t: float) -> int:
+        """Convert time value to x pixel coordinate."""
+        timeline_x = self.LABEL_WIDTH + 5
+        timeline_width = self.width() - self.LABEL_WIDTH - 10
+        time_range = self.time_max - self.time_min
+        if time_range <= 0:
+            return timeline_x
+        normalized = (t - self.time_min) / time_range
+        return int(timeline_x + normalized * timeline_width)
+    
+    def _get_value_at_time(self, time: float) -> Optional[tuple[float, str]]:
+        """Get the value and display string at a given time."""
+        for start, end, value, color in self.segments:
+            if start <= time <= end:
+                if self.signal_def and self.signal_def.choices:
+                    int_val = int(round(value))
+                    display = self.signal_def.choices.get(int_val, str(int_val))
+                else:
+                    if abs(value - round(value)) < 0.001:
+                        display = str(int(round(value)))
+                    else:
+                        display = f"{value:.3f}"
+                return (value, display)
+        return None
+    
+    def wheelEvent(self, event: QWheelEvent) -> None:
+        """Handle mouse wheel for zooming."""
+        if event.position().x() > self.LABEL_WIDTH:
+            mouse_time = self._x_to_time(int(event.position().x()))
+            delta = event.angleDelta().y()
+            self.wheel_zoom.emit(delta, mouse_time)
+        event.accept()
+    
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        """Start drag operation for panning."""
+        if event.button() == Qt.MouseButton.LeftButton and event.position().x() > self.LABEL_WIDTH:
+            self._is_dragging = True
+            self._drag_start_x = int(event.position().x())
+            self._drag_start_time = self._x_to_time(self._drag_start_x)
+            self.setCursor(QCursor(Qt.CursorShape.ClosedHandCursor))
+            event.accept()
+        else:
+            super().mousePressEvent(event)
+    
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        """Handle mouse move for drag panning and tooltips."""
+        x = int(event.position().x())
+        
+        if self._is_dragging:
+            # Calculate time delta and emit pan signal
+            current_time = self._x_to_time(x)
+            delta_time = self._drag_start_time - current_time
+            self.drag_pan.emit(delta_time)
+            self._drag_start_x = x
+            self._drag_start_time = self._x_to_time(x)
+        elif x > self.LABEL_WIDTH:
+            # Show tooltip with value at cursor
+            time = self._x_to_time(x)
+            result = self._get_value_at_time(time)
+            if result:
+                value, display = result
+                tooltip_text = f"{self.short_name}\nTime: {time:.4f}s\nValue: {display}"
+                QToolTip.showText(event.globalPosition().toPoint(), tooltip_text, self)
+            else:
+                QToolTip.hideText()
+            # Change cursor to indicate interactivity
+            self.setCursor(QCursor(Qt.CursorShape.OpenHandCursor))
+        else:
+            self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
+            QToolTip.hideText()
+        
+        event.accept()
+    
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        """End drag operation."""
+        if event.button() == Qt.MouseButton.LeftButton and self._is_dragging:
+            self._is_dragging = False
+            if event.position().x() > self.LABEL_WIDTH:
+                self.setCursor(QCursor(Qt.CursorShape.OpenHandCursor))
+            else:
+                self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
+            event.accept()
+        else:
+            super().mouseReleaseEvent(event)
+    
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
+        """Double-click to reset view (handled by parent)."""
+        if event.position().x() > self.LABEL_WIDTH:
+            # Let parent handle fit-to-data
+            event.ignore()
+        else:
+            super().mouseDoubleClickEvent(event)
+    
+    def leaveEvent(self, event) -> None:
+        """Hide tooltip when mouse leaves."""
+        QToolTip.hideText()
+        self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
+        super().leaveEvent(event)
+    
     def paintEvent(self, event) -> None:
         """Custom paint for the timeline row."""
         painter = QPainter(self)
@@ -175,7 +304,6 @@ class StateTimelineRow(QFrame):
         font.setBold(True)
         painter.setFont(font)
         
-        # Elide text if too long
         fm = QFontMetrics(font)
         elided_name = fm.elidedText(self.short_name, Qt.TextElideMode.ElideRight, label_rect_width - 16)
         text_y = (height + fm.ascent() - fm.descent()) // 2
@@ -184,8 +312,6 @@ class StateTimelineRow(QFrame):
         # Draw separator line
         painter.setPen(QPen(QColor("#3D3D3D"), 1))
         painter.drawLine(label_rect_width, 0, label_rect_width, height)
-        
-        # Draw bottom border
         painter.drawLine(0, height - 1, width, height - 1)
         
         # Timeline area
@@ -196,14 +322,9 @@ class StateTimelineRow(QFrame):
             painter.end()
             return
         
-        # Time to pixel conversion
         time_range = self.time_max - self.time_min
         if time_range <= 0:
             time_range = 1.0
-        
-        def time_to_x(t: float) -> int:
-            normalized = (t - self.time_min) / time_range
-            return int(timeline_x + normalized * timeline_width)
         
         # Draw segments
         bar_y = 8
@@ -214,26 +335,20 @@ class StateTimelineRow(QFrame):
         fm = QFontMetrics(font)
         
         for start_time, end_time, value, color in self.segments:
-            x1 = max(timeline_x, time_to_x(start_time))
-            x2 = min(timeline_x + timeline_width, time_to_x(end_time))
+            x1 = max(timeline_x, self._time_to_x(start_time))
+            x2 = min(timeline_x + timeline_width, self._time_to_x(end_time))
             
-            # Skip if outside view
             if x2 < timeline_x or x1 > timeline_x + timeline_width:
                 continue
             
-            # Minimum segment width for visibility
             segment_width = max(4, x2 - x1)
             
-            # Draw bar fill
             painter.fillRect(x1, bar_y, segment_width, bar_height, QColor(color))
             
-            # Draw border
             painter.setPen(QPen(QColor("#1E1E1E"), 1))
             painter.drawRect(x1, bar_y, segment_width, bar_height)
             
-            # Draw value text if segment is wide enough
             if segment_width > 25:
-                # Get display text
                 if self.signal_def and self.signal_def.choices:
                     int_val = int(round(value))
                     display_value = self.signal_def.choices.get(int_val, str(int_val))
@@ -243,21 +358,19 @@ class StateTimelineRow(QFrame):
                     else:
                         display_value = f"{value:.1f}"
                 
-                # Elide if needed
                 text_width = fm.horizontalAdvance(display_value)
                 if text_width > segment_width - 6:
                     display_value = fm.elidedText(display_value, Qt.TextElideMode.ElideRight, segment_width - 6)
                     text_width = fm.horizontalAdvance(display_value)
                 
-                # Draw text centered in bar
-                painter.setPen(QColor("#000000"))  # Black text on colored background
+                painter.setPen(QColor("#000000"))
                 text_x = x1 + (segment_width - text_width) // 2
                 text_y = bar_y + (bar_height + fm.ascent() - fm.descent()) // 2
                 painter.drawText(text_x, text_y, display_value)
         
         # Draw cursor line if set
         if self.cursor_time is not None and self.time_min <= self.cursor_time <= self.time_max:
-            cursor_x = time_to_x(self.cursor_time)
+            cursor_x = self._time_to_x(self.cursor_time)
             painter.setPen(QPen(QColor("#FF5722"), 2))
             painter.drawLine(cursor_x, 2, cursor_x, height - 2)
         
@@ -265,9 +378,21 @@ class StateTimelineRow(QFrame):
 
 
 class TimeAxisWidget(QFrame):
-    """Time axis header showing time scale."""
+    """
+    Time axis header showing time scale.
     
-    LABEL_WIDTH = 120  # Match row label width
+    Features:
+    - Mouse wheel zoom (centered on cursor)
+    - Drag to pan
+    - Double-click to reset view
+    """
+    
+    LABEL_WIDTH = 120
+    
+    # Signals for interaction
+    wheel_zoom = Signal(float, float)  # (delta, mouse_time_position)
+    drag_pan = Signal(float)  # delta_time
+    reset_view = Signal()  # Double-click to fit all data
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -276,8 +401,14 @@ class TimeAxisWidget(QFrame):
         self.time_max = 10.0
         self.cursor_time: Optional[float] = None
         
+        # Drag state
+        self._is_dragging = False
+        self._drag_start_x = 0
+        self._drag_start_time = 0.0
+        
         self.setFixedHeight(28)
         self.setAutoFillBackground(True)
+        self.setMouseTracking(True)
         self.setStyleSheet("background: #2D2D2D;")
     
     def set_time_range(self, time_min: float, time_max: float) -> None:
@@ -292,6 +423,86 @@ class TimeAxisWidget(QFrame):
         self.cursor_time = cursor_time
         self.repaint()
     
+    def _x_to_time(self, x: int) -> float:
+        """Convert x pixel coordinate to time value."""
+        timeline_x = self.LABEL_WIDTH + 5
+        timeline_width = self.width() - self.LABEL_WIDTH - 10
+        if timeline_width <= 0:
+            return self.time_min
+        normalized = (x - timeline_x) / timeline_width
+        return self.time_min + normalized * (self.time_max - self.time_min)
+    
+    def _time_to_x(self, t: float) -> int:
+        """Convert time value to x pixel coordinate."""
+        timeline_x = self.LABEL_WIDTH + 5
+        timeline_width = self.width() - self.LABEL_WIDTH - 10
+        time_range = self.time_max - self.time_min
+        if time_range <= 0:
+            return timeline_x
+        normalized = (t - self.time_min) / time_range
+        return int(timeline_x + normalized * timeline_width)
+    
+    def wheelEvent(self, event: QWheelEvent) -> None:
+        """Handle mouse wheel for zooming."""
+        if event.position().x() > self.LABEL_WIDTH:
+            mouse_time = self._x_to_time(int(event.position().x()))
+            delta = event.angleDelta().y()
+            self.wheel_zoom.emit(delta, mouse_time)
+        event.accept()
+    
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        """Start drag operation for panning."""
+        if event.button() == Qt.MouseButton.LeftButton and event.position().x() > self.LABEL_WIDTH:
+            self._is_dragging = True
+            self._drag_start_x = int(event.position().x())
+            self._drag_start_time = self._x_to_time(self._drag_start_x)
+            self.setCursor(QCursor(Qt.CursorShape.ClosedHandCursor))
+            event.accept()
+        else:
+            super().mousePressEvent(event)
+    
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        """Handle mouse move for drag panning."""
+        x = int(event.position().x())
+        
+        if self._is_dragging:
+            current_time = self._x_to_time(x)
+            delta_time = self._drag_start_time - current_time
+            self.drag_pan.emit(delta_time)
+            self._drag_start_x = x
+            self._drag_start_time = self._x_to_time(x)
+        elif x > self.LABEL_WIDTH:
+            self.setCursor(QCursor(Qt.CursorShape.OpenHandCursor))
+        else:
+            self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
+        
+        event.accept()
+    
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        """End drag operation."""
+        if event.button() == Qt.MouseButton.LeftButton and self._is_dragging:
+            self._is_dragging = False
+            if event.position().x() > self.LABEL_WIDTH:
+                self.setCursor(QCursor(Qt.CursorShape.OpenHandCursor))
+            else:
+                self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
+            event.accept()
+        else:
+            super().mouseReleaseEvent(event)
+    
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
+        """Double-click to reset view to fit all data."""
+        if event.position().x() > self.LABEL_WIDTH:
+            self.reset_view.emit()
+            event.accept()
+        else:
+            super().mouseDoubleClickEvent(event)
+    
+    def leaveEvent(self, event) -> None:
+        """Reset cursor when mouse leaves."""
+        self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
+        super().leaveEvent(event)
+    
     def paintEvent(self, event) -> None:
         """Paint the time axis."""
         painter = QPainter(self)
@@ -300,25 +511,19 @@ class TimeAxisWidget(QFrame):
         width = self.width()
         height = self.height()
         
-        # Background
         painter.fillRect(0, 0, width, height, QColor("#2D2D2D"))
-        
-        # Label area
         painter.fillRect(0, 0, self.LABEL_WIDTH, height, QColor("#2D2D2D"))
         
-        # Draw "Time [s]" label
         painter.setPen(QColor("#888888"))
         font = QFont()
         font.setPointSize(9)
         painter.setFont(font)
         painter.drawText(8, height - 8, "Time [s]")
         
-        # Draw separator
         painter.setPen(QPen(QColor("#3D3D3D"), 1))
         painter.drawLine(self.LABEL_WIDTH, 0, self.LABEL_WIDTH, height)
         painter.drawLine(0, height - 1, width, height - 1)
         
-        # Timeline area
         timeline_x = self.LABEL_WIDTH + 5
         timeline_width = width - self.LABEL_WIDTH - 10
         
@@ -330,15 +535,10 @@ class TimeAxisWidget(QFrame):
         if time_range <= 0:
             time_range = 1.0
         
-        def time_to_x(t: float) -> int:
-            normalized = (t - self.time_min) / time_range
-            return int(timeline_x + normalized * timeline_width)
-        
-        # Calculate tick spacing - aim for roughly 80 pixels between ticks
+        # Calculate tick spacing
         approx_ticks = max(2, timeline_width / 80)
         tick_interval = time_range / approx_ticks
         
-        # Round to nice intervals
         if tick_interval > 0:
             magnitude = 10 ** int(np.floor(np.log10(max(tick_interval, 1e-10))))
             normalized = tick_interval / magnitude
@@ -354,7 +554,6 @@ class TimeAxisWidget(QFrame):
         else:
             nice_interval = 1.0
         
-        # Draw ticks
         font = QFont("Consolas", 8)
         painter.setFont(font)
         fm = painter.fontMetrics()
@@ -363,17 +562,15 @@ class TimeAxisWidget(QFrame):
         tick = first_tick
         
         while tick <= self.time_max + nice_interval * 0.1:
-            x = time_to_x(tick)
+            x = self._time_to_x(tick)
             
             if x < timeline_x or x > timeline_x + timeline_width:
                 tick += nice_interval
                 continue
             
-            # Draw tick line
             painter.setPen(QPen(QColor("#555555"), 1))
             painter.drawLine(x, height - 6, x, height - 1)
             
-            # Draw label
             painter.setPen(QColor("#AAAAAA"))
             label = f"{tick:.3g}"
             label_width = fm.horizontalAdvance(label)
@@ -383,11 +580,10 @@ class TimeAxisWidget(QFrame):
         
         # Draw cursor line
         if self.cursor_time is not None and self.time_min <= self.cursor_time <= self.time_max:
-            cursor_x = time_to_x(self.cursor_time)
+            cursor_x = self._time_to_x(self.cursor_time)
             painter.setPen(QPen(QColor("#FF5722"), 2))
             painter.drawLine(cursor_x, 2, cursor_x, height - 2)
             
-            # Draw cursor time label
             painter.setPen(QColor("#FF5722"))
             cursor_label = f"{self.cursor_time:.3f}s"
             painter.drawText(cursor_x + 4, height - 10, cursor_label)
@@ -478,7 +674,7 @@ class StateDiagramControlPanel(QWidget):
         self._speed_slider = QSlider(Qt.Orientation.Horizontal)
         self._speed_slider.setMinimum(1)
         self._speed_slider.setMaximum(100)
-        self._speed_slider.setValue(10)  # Default 1x speed
+        self._speed_slider.setValue(10)
         self._speed_slider.valueChanged.connect(self._on_speed_changed)
         speed_layout.addWidget(self._speed_slider)
         
@@ -495,6 +691,12 @@ class StateDiagramControlPanel(QWidget):
         layout.addWidget(self._clear_btn)
         
         layout.addStretch()
+        
+        # Zoom info label
+        self._zoom_label = QLabel("Scroll: zoom | Drag: pan")
+        self._zoom_label.setStyleSheet("color: #555; font-size: 9px;")
+        self._zoom_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self._zoom_label)
         
         # Status label
         self._status_label = QLabel("Stopped")
@@ -546,7 +748,6 @@ class StateDiagramControlPanel(QWidget):
         self.stop_clicked.emit()
     
     def _on_speed_changed(self, value: int):
-        # Convert slider value (1-100) to speed multiplier (0.1x - 10x)
         speed = value / 10.0
         self._speed_label.setText(f"{speed:.1f}x")
         self.speed_changed.emit(speed)
@@ -573,19 +774,20 @@ class StateDiagramWidget(QWidget):
     """
     State diagram visualization as Gantt-chart style horizontal bars.
     
-    This is the main widget containing both the control panel and timeline.
     Features:
+    - Interactive pan/zoom with mouse wheel and drag
+    - Hover tooltips showing signal values
     - Timeline playback with cursor
     - Adjustable playback speed
-    - Auto-scroll during playback
     - Stores ALL signal data so signals can be added after parsing
     """
     
     add_signals_requested = Signal()
     
-    # Playback settings
-    PLAYBACK_INTERVAL_MS = 50  # Update every 50ms (20 FPS)
-    MAX_STORED_SIGNALS = 100_000  # Maximum signals to keep in buffer
+    PLAYBACK_INTERVAL_MS = 50
+    MAX_STORED_SIGNALS = 100_000
+    ZOOM_FACTOR = 0.15  # Zoom amount per wheel step
+    MIN_TIME_RANGE = 0.001  # Minimum visible time range (1ms)
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -595,25 +797,24 @@ class StateDiagramWidget(QWidget):
         self._rows: dict[str, StateTimelineRow] = {}
         self._last_values: dict[str, tuple[float, float]] = {}
         
-        # Store ALL incoming signals so we can replay when signals are selected
-        # Format: {signal_full_name: [(timestamp, raw_value), ...]}
         self._all_signal_data: dict[str, list[tuple[float, float]]] = {}
         
-        # View time range (what's visible)
+        # Time offset - first timestamp becomes 0
+        self._time_offset = 0.0
+        self._time_offset_set = False
+        
         self._view_time_min = 0.0
         self._view_time_max = 10.0
         
-        # Data time range (actual data extent)
+        # Data time range (relative to offset, so starts at 0)
         self._data_time_min = 0.0
         self._data_time_max = 0.0
         
-        # Playback state
         self._is_running = False
-        self._playback_position = 0.0  # Current playback time
-        self._playback_speed = 1.0  # Speed multiplier
-        self._view_window_size = 10.0  # Visible window size in seconds
+        self._playback_position = 0.0
+        self._playback_speed = 1.0
+        self._view_window_size = 10.0
         
-        # Playback timer
         self._playback_timer = QTimer(self)
         self._playback_timer.setInterval(self.PLAYBACK_INTERVAL_MS)
         self._playback_timer.timeout.connect(self._on_playback_tick)
@@ -625,7 +826,6 @@ class StateDiagramWidget(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         
-        # Main splitter
         self._splitter = QSplitter(Qt.Orientation.Horizontal)
         
         # Left panel - Controls
@@ -648,6 +848,9 @@ class StateDiagramWidget(QWidget):
         
         # Time axis header
         self._time_header = TimeAxisWidget()
+        self._time_header.wheel_zoom.connect(self._on_wheel_zoom)
+        self._time_header.drag_pan.connect(self._on_drag_pan)
+        self._time_header.reset_view.connect(self._fit_view_to_data)
         timeline_layout.addWidget(self._time_header)
         
         # Scroll area for rows
@@ -662,7 +865,6 @@ class StateDiagramWidget(QWidget):
             }
         """)
         
-        # Container for rows
         self._rows_container = QWidget()
         self._rows_container.setStyleSheet("background: #1E1E1E;")
         self._rows_layout = QVBoxLayout(self._rows_container)
@@ -670,7 +872,6 @@ class StateDiagramWidget(QWidget):
         self._rows_layout.setSpacing(0)
         self._rows_layout.addStretch()
         
-        # Empty state message
         self._empty_label = QLabel("Click 'Add Signals' to select signals for the state diagram")
         self._empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._empty_label.setStyleSheet("color: #666; font-size: 12px; padding: 60px;")
@@ -684,16 +885,54 @@ class StateDiagramWidget(QWidget):
         
         layout.addWidget(self._splitter)
     
+    def _on_wheel_zoom(self, delta: float, mouse_time: float) -> None:
+        """Handle mouse wheel zoom centered on mouse position."""
+        if self._is_running:
+            return  # Don't zoom during playback
+        
+        # Calculate zoom factor
+        if delta > 0:
+            factor = 1 - self.ZOOM_FACTOR  # Zoom in
+        else:
+            factor = 1 + self.ZOOM_FACTOR  # Zoom out
+        
+        # Current range
+        current_range = self._view_time_max - self._view_time_min
+        new_range = current_range * factor
+        
+        # Clamp minimum zoom
+        if new_range < self.MIN_TIME_RANGE:
+            new_range = self.MIN_TIME_RANGE
+        
+        # Keep mouse position fixed on screen
+        mouse_ratio = (mouse_time - self._view_time_min) / current_range if current_range > 0 else 0.5
+        
+        self._view_time_min = mouse_time - mouse_ratio * new_range
+        self._view_time_max = mouse_time + (1 - mouse_ratio) * new_range
+        self._view_window_size = new_range
+        
+        self._sync_time_range()
+        self._time_header.set_time_range(self._view_time_min, self._view_time_max)
+    
+    def _on_drag_pan(self, delta_time: float) -> None:
+        """Handle drag panning."""
+        if self._is_running:
+            return  # Don't pan during playback
+        
+        self._view_time_min += delta_time
+        self._view_time_max += delta_time
+        
+        self._sync_time_range()
+        self._time_header.set_time_range(self._view_time_min, self._view_time_max)
+    
     def set_signal_definitions(self, definitions: dict[str, SignalDefinition]) -> None:
         """Set available signal definitions from DBC."""
         self._signal_defs = definitions
     
     def set_active_signals(self, signal_names: list[str]) -> None:
         """Set which signals to display."""
-        # Stop playback when changing signals
         self._on_stop()
         
-        # Remove old rows
         for name in list(self._rows.keys()):
             if name not in signal_names:
                 row = self._rows.pop(name)
@@ -702,23 +941,23 @@ class StateDiagramWidget(QWidget):
                 if name in self._last_values:
                     del self._last_values[name]
         
-        # Add new rows and rebuild from stored data
         for name in signal_names:
             if name not in self._rows:
                 sig_def = self._signal_defs.get(name)
                 row = StateTimelineRow(name, sig_def)
                 row.set_time_range(self._view_time_min, self._view_time_max)
+                # Connect row signals for zoom/pan
+                row.wheel_zoom.connect(self._on_wheel_zoom)
+                row.drag_pan.connect(self._on_drag_pan)
                 self._rows[name] = row
                 self._rows_layout.insertWidget(self._rows_layout.count() - 1, row)
                 
-                # Rebuild timeline from stored data
                 self._rebuild_row_from_data(name, row)
         
         self._active_signals = list(signal_names)
         self._empty_label.setVisible(len(self._active_signals) == 0)
         self._control_panel.set_signals(signal_names)
         
-        # Update view to fit data
         self._fit_view_to_data()
     
     def _rebuild_row_from_data(self, signal_name: str, row: StateTimelineRow) -> None:
@@ -737,19 +976,15 @@ class StateDiagramWidget(QWidget):
         
         for timestamp, value in data:
             if last_val is None:
-                # First value
                 row.add_segment(timestamp, timestamp + 0.01, value)
             elif abs(value - last_val) > 0.0001:
-                # Value changed - start new segment
                 row.add_segment(timestamp, timestamp + 0.01, value)
             else:
-                # Same value - extend current segment
                 row.update_last_segment(timestamp)
             
             last_val = value
             last_ts = timestamp
         
-        # Update last_values for future streaming
         if last_ts is not None and last_val is not None:
             self._last_values[signal_name] = (last_ts, last_val)
     
@@ -759,33 +994,35 @@ class StateDiagramWidget(QWidget):
     
     @Slot(list)
     def add_signals(self, signals: list[DecodedSignal]) -> None:
-        """Add new decoded signals (streaming mode).
-        
-        Stores ALL signals for later use, even if not currently active.
-        Only updates UI for active signals.
-        """
+        """Add new decoded signals (streaming mode)."""
         for signal in signals:
             full_name = signal.full_name
-            timestamp = signal.timestamp
+            abs_timestamp = signal.timestamp
             value = signal.raw_value
             
-            # Store ALL signal data for later replay
+            # Set time offset on first signal (first timestamp becomes 0)
+            if not self._time_offset_set:
+                self._time_offset = abs_timestamp
+                self._time_offset_set = True
+            
+            # Convert to relative time (duration from start)
+            rel_timestamp = abs_timestamp - self._time_offset
+            
             if full_name not in self._all_signal_data:
                 self._all_signal_data[full_name] = []
             
-            self._all_signal_data[full_name].append((timestamp, value))
+            # Store relative timestamp
+            self._all_signal_data[full_name].append((rel_timestamp, value))
             
-            # Limit stored data per signal
             if len(self._all_signal_data[full_name]) > self.MAX_STORED_SIGNALS:
                 self._all_signal_data[full_name] = self._all_signal_data[full_name][-self.MAX_STORED_SIGNALS:]
             
-            # Update data time range
-            if self._data_time_min == 0.0 or timestamp < self._data_time_min:
-                self._data_time_min = timestamp
-            if timestamp > self._data_time_max:
-                self._data_time_max = timestamp
+            # Update data time range (relative times)
+            if rel_timestamp < self._data_time_min:
+                self._data_time_min = rel_timestamp
+            if rel_timestamp > self._data_time_max:
+                self._data_time_max = rel_timestamp
             
-            # Only update UI for active signals
             if full_name not in self._active_signals:
                 continue
             
@@ -793,31 +1030,27 @@ class StateDiagramWidget(QWidget):
             if not row:
                 continue
             
-            # Check if value changed
             if full_name in self._last_values:
                 last_ts, last_val = self._last_values[full_name]
                 
                 if abs(value - last_val) > 0.0001:
-                    # Value changed - start new segment
-                    row.add_segment(timestamp, timestamp + 0.01, value)
+                    row.add_segment(rel_timestamp, rel_timestamp + 0.01, value)
                 else:
-                    # Same value - extend current segment
-                    row.update_last_segment(timestamp)
+                    row.update_last_segment(rel_timestamp)
             else:
-                # First value for this signal
-                row.add_segment(timestamp, timestamp + 0.01, value)
+                row.add_segment(rel_timestamp, rel_timestamp + 0.01, value)
             
-            self._last_values[full_name] = (timestamp, value)
+            self._last_values[full_name] = (rel_timestamp, value)
         
-        # Update view if not running playback (show all data)
         if not self._is_running and self._active_signals:
             self._fit_view_to_data()
     
     def _fit_view_to_data(self) -> None:
-        """Fit the view to show all data."""
-        if self._data_time_max > self._data_time_min:
-            padding = (self._data_time_max - self._data_time_min) * 0.05
-            self._view_time_min = self._data_time_min - padding
+        """Fit the view to show all data (relative time starting from 0)."""
+        if self._data_time_max > 0:
+            # Start from 0, add small padding at end
+            padding = self._data_time_max * 0.05
+            self._view_time_min = 0.0
             self._view_time_max = self._data_time_max + padding
             self._view_window_size = self._view_time_max - self._view_time_min
             self._sync_time_range()
@@ -836,17 +1069,16 @@ class StateDiagramWidget(QWidget):
     
     def _on_run(self):
         """Start playback."""
-        if not self._rows or self._data_time_max <= self._data_time_min:
+        if not self._rows or self._data_time_max <= 0:
             logger.warning("No data to play back")
             return
         
         self._is_running = True
         
-        # Start from data beginning if at end or before data
-        if self._playback_position >= self._data_time_max or self._playback_position < self._data_time_min:
-            self._playback_position = self._data_time_min
+        # Start from 0 if at end or before start
+        if self._playback_position >= self._data_time_max or self._playback_position < 0:
+            self._playback_position = 0.0
         
-        # Set initial view window
         self._view_time_min = self._playback_position
         self._view_time_max = self._playback_position + self._view_window_size
         
@@ -871,45 +1103,37 @@ class StateDiagramWidget(QWidget):
     def _on_speed_changed(self, speed: float):
         """Handle playback speed change."""
         self._playback_speed = speed
-        logger.debug(f"Playback speed: {speed}x")
     
     def _on_playback_tick(self):
         """Called by timer during playback."""
         if not self._is_running:
             return
         
-        # Calculate time step based on speed
-        # At 1x speed, advance real-time amount
         time_step = (self.PLAYBACK_INTERVAL_MS / 1000.0) * self._playback_speed
         self._playback_position += time_step
         
-        # Check if reached end of data
         if self._playback_position >= self._data_time_max:
             self._playback_position = self._data_time_max
             self._on_stop()
             return
         
-        # Update view window (scrolling effect)
-        # Keep cursor at 20% from left edge
         cursor_offset = self._view_window_size * 0.2
         self._view_time_min = self._playback_position - cursor_offset
         self._view_time_max = self._view_time_min + self._view_window_size
         
-        # Clamp to data range
-        if self._view_time_min < self._data_time_min:
-            self._view_time_min = self._data_time_min
-            self._view_time_max = self._view_time_min + self._view_window_size
+        # Clamp to start at 0
+        if self._view_time_min < 0:
+            self._view_time_min = 0
+            self._view_time_max = self._view_window_size
         
-        # Update view
         self._sync_time_range()
         self._time_header.set_time_range(self._view_time_min, self._view_time_max)
         self._set_cursor(self._playback_position)
         
-        # Update status
-        data_duration = self._data_time_max - self._data_time_min
+        # Show duration (data_time_max is already relative, starting from 0)
         self._control_panel.set_playback_time(
-            self._playback_position - self._data_time_min,
-            data_duration
+            self._playback_position,
+            self._data_time_max
         )
     
     def _on_signal_removed(self, full_name: str):
@@ -924,7 +1148,9 @@ class StateDiagramWidget(QWidget):
             row.clear()
         
         self._last_values.clear()
-        self._all_signal_data.clear()  # Clear stored data too
+        self._all_signal_data.clear()
+        self._time_offset = 0.0
+        self._time_offset_set = False
         self._data_time_min = 0.0
         self._data_time_max = 0.0
         self._view_time_min = 0.0
@@ -945,7 +1171,9 @@ class StateDiagramWidget(QWidget):
         
         self._rows.clear()
         self._last_values.clear()
-        self._all_signal_data.clear()  # Clear stored data too
+        self._all_signal_data.clear()
+        self._time_offset = 0.0
+        self._time_offset_set = False
         self._data_time_min = 0.0
         self._data_time_max = 0.0
         self._view_time_min = 0.0

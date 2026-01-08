@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMenu,
     QAbstractItemView,
+    QColorDialog,
 )
 from PySide6.QtGui import QColor, QAction
 
@@ -46,6 +47,7 @@ class SelectedSignalsWidget(QWidget):
     signals_cleared = Signal()
     signal_double_clicked = Signal(str)  # full_name for focusing in plot
     selection_changed = Signal(list)  # List of full_names
+    color_changed = Signal(str, str)  # (full_name, hex_color) - empty string for reset
     
     # Same color palette as plot for consistency
     COLORS = [
@@ -59,6 +61,7 @@ class SelectedSignalsWidget(QWidget):
         
         self._selected_signals: list[str] = []  # List of full_names
         self._signal_defs: dict[str, SignalDefinition] = {}
+        self._custom_colors: dict[str, str] = {}  # signal_name -> hex color
         
         self._setup_ui()
     
@@ -185,8 +188,8 @@ class SelectedSignalsWidget(QWidget):
             msg_name = parts[0] if len(parts) > 0 else ""
             sig_name = parts[1] if len(parts) > 1 else full_name
             
-            # Get color for this signal
-            color = self.COLORS[i % len(self.COLORS)]
+            # Get color for this signal (custom or default from palette)
+            color = self._custom_colors.get(full_name) or self.COLORS[i % len(self.COLORS)]
             
             # Create display text
             if sig_def:
@@ -265,6 +268,19 @@ class SelectedSignalsWidget(QWidget):
             full_name = item.data(Qt.ItemDataRole.UserRole)
             sig_name = full_name.split(".")[-1] if full_name else "Signal"
             
+            # Set Color action
+            set_color_action = QAction(f"🎨 Set Color...", self)
+            set_color_action.triggered.connect(lambda: self._on_set_color(full_name))
+            menu.addAction(set_color_action)
+            
+            # Reset Color action (only if custom color is set)
+            if full_name in self._custom_colors:
+                reset_color_action = QAction(f"↩️ Reset Color", self)
+                reset_color_action.triggered.connect(lambda: self._on_reset_color(full_name))
+                menu.addAction(reset_color_action)
+            
+            menu.addSeparator()
+            
             # Focus action
             focus_action = QAction(f"Focus '{sig_name}' in Plot", self)
             focus_action.triggered.connect(lambda: self.signal_double_clicked.emit(full_name))
@@ -303,4 +319,54 @@ class SelectedSignalsWidget(QWidget):
     def signal_count(self) -> int:
         """Get number of selected signals."""
         return len(self._selected_signals)
+    
+    def _on_set_color(self, full_name: str) -> None:
+        """Open color dialog to set custom signal color."""
+        sig_name = full_name.split(".")[-1]
+        
+        # Get current color as initial color
+        if full_name in self._custom_colors:
+            initial_color = QColor(self._custom_colors[full_name])
+        else:
+            # Use default color from palette
+            signal_idx = self._selected_signals.index(full_name) if full_name in self._selected_signals else 0
+            initial_color = QColor(self.COLORS[signal_idx % len(self.COLORS)])
+        
+        # Open color dialog
+        color = QColorDialog.getColor(
+            initial_color,
+            self,
+            f"Select Color for {sig_name}"
+        )
+        
+        if color.isValid():
+            # Store custom color
+            self._custom_colors[full_name] = color.name()
+            # Rebuild list to show new color
+            self._rebuild_list()
+            # Emit signal so plot can update
+            self.color_changed.emit(full_name, color.name())
+            logger.debug(f"Set custom color for {full_name}: {color.name()}")
+    
+    def _on_reset_color(self, full_name: str) -> None:
+        """Reset signal to default palette color."""
+        if full_name in self._custom_colors:
+            del self._custom_colors[full_name]
+            # Rebuild list to show default color
+            self._rebuild_list()
+            # Emit signal with empty string to indicate reset
+            self.color_changed.emit(full_name, "")
+            logger.debug(f"Reset color for {full_name} to default")
+    
+    def set_custom_color(self, full_name: str, color: str) -> None:
+        """Set custom color for a signal (called externally)."""
+        if color:
+            self._custom_colors[full_name] = color
+        elif full_name in self._custom_colors:
+            del self._custom_colors[full_name]
+        self._rebuild_list()
+    
+    def get_custom_colors(self) -> dict[str, str]:
+        """Get all custom color assignments."""
+        return self._custom_colors.copy()
 

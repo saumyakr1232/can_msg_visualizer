@@ -54,6 +54,7 @@ class FullscreenPlotWindow(QMainWindow):
         self._signal_data: dict[str, tuple[list[float], list[float]]] = {}
         self._plot_items: dict[str, pg.PlotDataItem] = {}
         self._selected_signals: list[str] = []
+        self._custom_colors: dict[str, str] = {}  # signal_name -> hex color
         
         # Crosshair and tooltip components
         self._vline: Optional[pg.InfiniteLine] = None
@@ -263,10 +264,11 @@ class FullscreenPlotWindow(QMainWindow):
                 y = y[::factor]
             
             total_points += len(x)
-            color = self.COLORS[i % len(self.COLORS)]
+            color = self._custom_colors.get(name) or self.COLORS[i % len(self.COLORS)]
             
             if name in self._plot_items:
                 self._plot_items[name].setData(x, y)
+                self._plot_items[name].setPen(pg.mkPen(color=color, width=1.5))
             else:
                 pen = pg.mkPen(color=color, width=1.5)
                 item = self._plot_widget.plot(
@@ -293,6 +295,20 @@ class FullscreenPlotWindow(QMainWindow):
             name: (list(ts), list(vs))
             for name, (ts, vs) in data.items()
         }
+        self._update_plot()
+    
+    def set_signal_color(self, signal_name: str, color: str) -> None:
+        """
+        Set custom color for a signal.
+        
+        Args:
+            signal_name: Full signal name (Message.Signal)
+            color: Hex color string, or empty string to reset to default
+        """
+        if color:
+            self._custom_colors[signal_name] = color
+        elif signal_name in self._custom_colors:
+            del self._custom_colors[signal_name]
         self._update_plot()
     
     def _on_grid_toggled(self, checked: bool) -> None:

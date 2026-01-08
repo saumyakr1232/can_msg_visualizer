@@ -322,6 +322,7 @@ class MainWindow(QMainWindow):
         self._selected_signals_widget.signal_removed.connect(self._on_signal_removed_from_panel)
         self._selected_signals_widget.signals_cleared.connect(self._on_signals_cleared_from_panel)
         self._selected_signals_widget.selection_changed.connect(self._on_selected_panel_changed)
+        self._selected_signals_widget.color_changed.connect(self._on_signal_color_changed)
         
         # Plot fullscreen request
         self._plot_widget.fullscreen_requested.connect(self._on_open_fullscreen)
@@ -814,6 +815,16 @@ class MainWindow(QMainWindow):
         if self._fullscreen_window and self._fullscreen_window.isVisible():
             self._fullscreen_window.set_selected_signals(full_names)
     
+    @Slot(str, str)
+    def _on_signal_color_changed(self, full_name: str, color: str) -> None:
+        """Handle custom color change from selected signals panel."""
+        # Update plot widget
+        self._plot_widget.set_signal_color(full_name, color)
+        
+        # Update fullscreen window if visible
+        if self._fullscreen_window and self._fullscreen_window.isVisible():
+            self._fullscreen_window.set_signal_color(full_name, color)
+    
     # ================== View Actions ==================
     
     @Slot()
@@ -874,7 +885,7 @@ class MainWindow(QMainWindow):
     
     @Slot()
     def _on_message_log_add_filter(self) -> None:
-        """Open signal selector dialog for message log filter."""
+        """Open signal selector dialog to add signals to message log filter."""
         if not self._decoder:
             QMessageBox.warning(
                 self,
@@ -890,16 +901,20 @@ class MainWindow(QMainWindow):
                 full_name = f"{msg.name}.{sig.name}"
                 signal_defs[full_name] = sig
         
-        # Show dialog
+        # Get currently active filters
+        already_selected = self._log_table.get_signal_filter()
+        
+        # Show dialog with already selected signals pre-checked
         selected = SignalSelectorDialog.select_signals(
             signal_defs,
-            already_selected=[],
+            already_selected=already_selected,
             parent=self,
         )
         
         if selected is not None:
-            self._log_table.set_signal_filter(selected)
-            logger.info(f"Message log filter updated: {len(selected)} signals")
+            # Add new selections to existing filter
+            self._log_table.add_signal_filter(selected)
+            logger.info(f"Added {len(selected)} signals to message log filter")
     
     @Slot()
     def _on_clear_all(self) -> None:
