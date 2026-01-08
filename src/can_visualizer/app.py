@@ -33,7 +33,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import QAction, QKeySequence
 
-from .core.cache import CacheManager
+from .core import DataStore
 from .core.decoder import DBCDecoder
 from .core.models import ParseProgress, ParseState, DecodedSignal, SignalDefinition
 from .workers.parse_worker import ParseWorker
@@ -144,11 +144,10 @@ class MainWindow(QMainWindow):
 
         # State
         self._dbc_path: Optional[Path] = None
+        self._data_store: Optional[DataStore] = DataStore()
         self._trace_path: Optional[Path] = None
         self._decoder: Optional[DBCDecoder] = None
-        self._cache_manager = CacheManager()
         self._parse_worker: Optional[ParseWorker] = None
-        self._cache_key: Optional[str] = None
         self._fullscreen_window: Optional[FullscreenPlotWindow] = None
 
         self._setup_ui()
@@ -179,7 +178,7 @@ class MainWindow(QMainWindow):
         self._tabs = QTabWidget()
 
         # Message Log Tab (with built-in filter panel)
-        self._log_table = LogTableWidget()
+        self._log_table = LogTableWidget(data_store=self._data_store)
         self._tabs.addTab(self._log_table, "📋 Message Log")
 
         # Signal Plot Tab (with DBC browser)
@@ -244,17 +243,6 @@ class MainWindow(QMainWindow):
         self._clear_action.setShortcut(QKeySequence("Ctrl+Shift+C"))
         self._clear_action.triggered.connect(self._on_clear_all)
         view_menu.addAction(self._clear_action)
-
-        # Cache menu
-        cache_menu = menubar.addMenu("&Cache")
-
-        cache_stats_action = QAction("Show Cache &Statistics", self)
-        cache_stats_action.triggered.connect(self._on_show_cache_stats)
-        cache_menu.addAction(cache_stats_action)
-
-        clear_cache_action = QAction("&Clear All Cache", self)
-        clear_cache_action.triggered.connect(self._on_clear_cache)
-        cache_menu.addAction(clear_cache_action)
 
     def _setup_toolbar(self) -> None:
         """Setup main toolbar."""
@@ -659,7 +647,7 @@ class MainWindow(QMainWindow):
         self._parse_worker = ParseWorker(
             self._trace_path,
             self._dbc_path,
-            self._cache_manager,
+            self._data_store,
         )
 
         # Connect signals with QueuedConnection for thread safety
@@ -730,23 +718,21 @@ class MainWindow(QMainWindow):
         if progress.state == ParseState.PARSING:
             self._status_message.setText(f"Parsing... {progress.progress_percent:.1f}%")
 
-    @Slot(list)
-    def _on_signals_decoded(self, signals: list[DecodedSignal]) -> None:
+    @Slot()
+    def _on_signals_decoded(self) -> None:
         """Handle decoded signal batch."""
         # Route to widgets
-        self._log_table.add_signals(signals)
-        self._plot_widget.add_signals(signals)
-        self._state_diagram.add_signals(signals)
+        self._log_table.new_data()
+        # self._plot_widget.new_data()
+        # self._state_diagram.new_data()
 
-        # Update fullscreen window if open
-        if self._fullscreen_window and self._fullscreen_window.isVisible():
-            self._fullscreen_window.add_signals(signals)
+        # # Update fullscreen window if open
+        # if self._fullscreen_window and self._fullscreen_window.isVisible():
+        #     self._fullscreen_window.new(signals)
 
-    @Slot(str)
-    def _on_parsing_completed(self, cache_key: str) -> None:
+    @Slot()
+    def _on_parsing_completed(self) -> None:
         """Handle parse completion."""
-        self._cache_key = cache_key
-
         self._stop_action.setEnabled(False)
         self._stop_btn.setEnabled(False)
         self._progress_bar.setVisible(False)
@@ -755,7 +741,7 @@ class MainWindow(QMainWindow):
             f"Parsing complete - {self._log_table.signal_count:,} signals"
         )
 
-        logger.info(f"Parsing completed, cache key: {cache_key[:16]}...")
+        logger.info("Parsing completed")
 
     @Slot()
     def _on_parsing_cancelled(self) -> None:
@@ -938,37 +924,6 @@ class MainWindow(QMainWindow):
 
         self._msg_count_label.setText("Messages: 0")
         self._status_message.setText("Data cleared")
-
-    # ================== Cache Actions ==================
-
-    @Slot()
-    def _on_show_cache_stats(self) -> None:
-        """Show cache statistics dialog."""
-        stats = self._cache_manager.get_cache_stats()
-
-        QMessageBox.information(
-            self,
-            "Cache Statistics",
-            f"Cached files: {stats['cached_files']}\n"
-            f"Total signals: {stats['total_signals']:,}\n"
-            f"Database size: {stats['database_size_mb']:.2f} MB",
-        )
-
-    @Slot()
-    def _on_clear_cache(self) -> None:
-        """Clear all cached data."""
-        reply = QMessageBox.question(
-            self,
-            "Clear Cache",
-            "Are you sure you want to clear all cached data?\n"
-            "This will require re-parsing previously loaded files.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        )
-
-        if reply == QMessageBox.StandardButton.Yes:
-            self._cache_manager.clear_all()
-            self._status_message.setText("Cache cleared")
-            logger.info("Cache cleared by user")
 
     # ================== Cleanup ==================
 

@@ -4,12 +4,11 @@ CAN Message Log Table Widget.
 High-performance table view for streaming decoded CAN signals.
 Designed to handle millions of rows efficiently using:
 - Infinite scroll pagination (load 1000 signals at a time)
-- Lazy UI updates (buffer signals, update on timer/scroll)
+- Lazy UI updates (fetch from DataStore)
 - Virtual scrolling (Qt only requests visible rows)
 """
 
 from typing import Optional
-from collections import deque
 from PySide6.QtCore import Qt, QAbstractTableModel, QModelIndex, Signal, Slot, QTimer
 from PySide6.QtWidgets import (
     QWidget,
@@ -28,6 +27,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import QColor
 
 from ..core.models import DecodedSignal
+from ..core.data_store import DataStore
 from ..utils.logging_config import get_logger
 
 logger = get_logger("log_table")
@@ -38,12 +38,11 @@ class SignalTableModel(QAbstractTableModel):
     Custom table model with infinite scroll pagination.
 
     Architecture:
-    - _all_signals: Backing buffer holding ALL received signals
     - _signals: Loaded subset for display (paginated, 1000 at a time)
-    - User scrolls to bottom -> load_more() adds next page
+    - User scrolls to bottom -> load_more() fetches next page from DataStore
 
     This reduces UI memory pressure by only keeping loaded pages in the
-    Qt model while maintaining full data in the backing buffer.
+    Qt model while maintaining full data in the backing SQLite store.
     """
 
     COLUMNS = [
@@ -58,24 +57,34 @@ class SignalTableModel(QAbstractTableModel):
 
     # Pagination settings
     PAGE_SIZE = 1000  # Signals per page for infinite scroll
-    MAX_BUFFER_SIZE = 500_000  # Max signals in backing buffer
 
     # Signal emitted when more data is available to load
     more_available = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        # Backing buffer - holds ALL signals
-        self._all_signals: list[DecodedSignal] = []
+        # Data source
+        self._data_store: Optional[DataStore] = None
+
         # Loaded signals - paginated subset for display
         self._signals: list[DecodedSignal] = []
+
         # Pagination state
-        self._loaded_count = 0
+        self._current_page = 0
 
         # Filtering
         self._filter_text: str = ""
         self._signal_filter: set[str] = set()
         self._filtered_indices: Optional[list[int]] = None
+
+    def set_data_store(self, data_store: DataStore) -> None:
+        """Set the data store source."""
+        self.beginResetModel()
+        self._data_store = data_store
+        self._signals.clear()
+        self._current_page = 0
+        self._filtered_indices = None
+        self.endResetModel()
 
     def rowCount(self, parent=QModelIndex()) -> int:
         if parent.isValid():
@@ -156,62 +165,30 @@ class SignalTableModel(QAbstractTableModel):
 
         return str(section + 1)
 
-    def add_signals(self, signals: list[DecodedSignal]) -> None:
-        """
-        Add new signals to the backing buffer.
-
-        Signals are added to _all_signals buffer. If this is the first
-        batch, automatically loads the first page into display.
-        """
-        if not signals:
-            return
-
-        # Add to backing buffer
-        self._all_signals.extend(signals)
-
-        # Trim backing buffer if too large
-        if len(self._all_signals) > self.MAX_BUFFER_SIZE:
-            trim_count = len(self._all_signals) - self.MAX_BUFFER_SIZE
-            self._all_signals = self._all_signals[trim_count:]
-            # Adjust loaded count if we trimmed loaded signals
-            if self._loaded_count > len(self._all_signals):
-                self._loaded_count = len(self._all_signals)
-                # Need to reload display signals
-                self._reload_display_signals()
-
-        # Auto-load first page if nothing loaded yet
-        if self._loaded_count == 0 and len(self._all_signals) > 0:
-            self.load_more()
-
-        # Notify that more data is available
-        if self.has_more():
-            self.more_available.emit()
-
     def load_more(self) -> int:
         """
-        Load the next page of signals into display.
+        Load the next page of signals from DataStore.
 
         Returns:
             Number of signals loaded in this page
         """
-        if not self.has_more():
+        if not self._data_store:
             return 0
 
-        # Calculate range to load
-        start = self._loaded_count
-        end = min(start + self.PAGE_SIZE, len(self._all_signals))
-        new_signals = self._all_signals[start:end]
+        next_page = self._current_page + 1
+        new_signals = list(
+            self._data_store.fetch_paginated_data(next_page, self.PAGE_SIZE)
+        )
 
         if not new_signals:
             return 0
 
-        # Add to display signals
         first_row = len(self._signals)
         last_row = first_row + len(new_signals) - 1
 
         self.beginInsertRows(QModelIndex(), first_row, last_row)
         self._signals.extend(new_signals)
-        self._loaded_count = end
+        self._current_page = next_page
 
         # Update filter if active
         if self._filter_text or self._signal_filter:
@@ -219,36 +196,26 @@ class SignalTableModel(QAbstractTableModel):
 
         self.endInsertRows()
 
-        logger.debug(
-            f"Loaded page: {len(new_signals)} signals (total loaded: {self._loaded_count})"
-        )
+        logger.debug(f"Loaded page {self._current_page}: {len(new_signals)} signals")
         return len(new_signals)
 
     def load_all(self) -> None:
-        """Load all remaining signals (use sparingly for large datasets)."""
+        """Load all remaining signals."""
         while self.has_more():
-            self.load_more()
-
-    def _reload_display_signals(self) -> None:
-        """Reload display signals from backing buffer after trim."""
-        self.beginResetModel()
-        self._signals = self._all_signals[: self._loaded_count]
-        if self._filter_text or self._signal_filter:
-            self._apply_filter()
-        else:
-            self._filtered_indices = None
-        self.endResetModel()
+            if self.load_more() == 0:
+                break
 
     def has_more(self) -> bool:
         """Check if there are more signals to load."""
-        return self._loaded_count < len(self._all_signals)
+        if not self._data_store:
+            return False
+        return len(self._signals) < self._data_store.get_total_count()
 
     def clear(self) -> None:
-        """Clear all signals (both buffer and display)."""
+        """Clear loaded signals."""
         self.beginResetModel()
-        self._all_signals.clear()
         self._signals.clear()
-        self._loaded_count = 0
+        self._current_page = 0
         self._filtered_indices = None
         self.endResetModel()
 
@@ -309,8 +276,8 @@ class SignalTableModel(QAbstractTableModel):
 
     @property
     def total_count(self) -> int:
-        """Total signals in backing buffer."""
-        return len(self._all_signals)
+        """Total signals in backing store."""
+        return self._data_store.get_total_count() if self._data_store else 0
 
     @property
     def loaded_count(self) -> int:
@@ -468,49 +435,42 @@ class LogTableWidget(QWidget):
 
     Features:
     - Infinite scroll pagination (1000 signals per page)
-    - Lazy UI updates (buffer incoming signals)
+    - Lazy UI updates (fetch from DataStore)
     - High-performance virtual scrolling
     - Search/filter capability
     - Signal name filtering
     - Auto-scroll to latest
-
-    Pagination Strategy:
-    - Incoming signals buffered in pending queue
-    - Timer flushes pending to model's backing buffer
-    - Model only displays loaded pages (1000 at a time)
-    - Scrolling near bottom triggers load_more()
     """
 
     signal_selected = Signal(DecodedSignal)
     add_filter_requested = Signal()  # Request to open signal selector
 
-    # Lazy update configuration
-    UPDATE_TIMER_INTERVAL = 500  # ms between automatic updates
-    MAX_PENDING_SIGNALS = 50000  # Force flush if buffer exceeds this
+    # Configuration
     SCROLL_LOAD_THRESHOLD = 50  # Pixels from bottom to trigger load more
+    UPDATE_TIMER_INTERVAL = 500  # ms check for updates
 
-    def __init__(self, parent=None):
+    def __init__(self, data_store: DataStore, parent=None):
         super().__init__(parent)
 
         self._model = SignalTableModel(self)
-        self._auto_scroll = True
-        self._is_parsing = False
+        self._auto_scroll = False
         self._is_loading_more = False
-
-        # Lazy update buffer
-        self._pending_signals: deque[DecodedSignal] = deque()
-        self._pending_count = 0
-
-        # Update timer for lazy flushing
-        self._update_timer = QTimer(self)
-        self._update_timer.setInterval(self.UPDATE_TIMER_INTERVAL)
-        self._update_timer.timeout.connect(self._flush_pending_signals)
 
         self._setup_ui()
         self._connect_model_signals()
 
-        # Start the update timer
+        self._model.set_data_store(data_store)
+
+        # Timer to check for new data during streaming
+        self._update_timer = QTimer(self)
+        self._update_timer.setInterval(self.UPDATE_TIMER_INTERVAL)
+        self._update_timer.timeout.connect(self._check_for_updates)
         self._update_timer.start()
+
+    def set_data_store(self, data_store: DataStore) -> None:
+        """Set the data store source."""
+        self._model.set_data_store(data_store)
+        self._update_status()
 
     def _setup_ui(self) -> None:
         """Initialize UI components."""
@@ -620,50 +580,34 @@ class LogTableWidget(QWidget):
         """Connect model signals."""
         self._model.more_available.connect(self._on_more_available)
 
-    @Slot(list)
-    def add_signals(self, signals: list[DecodedSignal]) -> None:
+    @Slot()
+    def new_data(self) -> None:
         """
-        Add new signals to the pending buffer.
-
-        Signals are buffered and flushed lazily to avoid blocking the UI
-        during rapid streaming.
+        Trigger update check when new data is available.
         """
-        if not signals:
-            return
+        # If we have 0 rows, immediate load common for initial view
+        if self._model.rowCount() == 0:
+            logger.info("New Data trigger")
+            self._load_more_signals()
 
-        # Add to pending buffer
-        self._pending_signals.extend(signals)
-        self._pending_count += len(signals)
-
-        # Force flush if buffer is getting too large
-        if self._pending_count >= self.MAX_PENDING_SIGNALS:
-            self._flush_pending_signals()
-
-    def _flush_pending_signals(self) -> None:
-        """Flush pending signals to the model's backing buffer."""
-        if not self._pending_signals:
-            return
-
-        # Convert deque to list and clear
-        signals_to_add = list(self._pending_signals)
-        self._pending_signals.clear()
-        self._pending_count = 0
-
-        # Add to model (goes to backing buffer, auto-loads first page)
-        self._model.add_signals(signals_to_add)
+    def _check_for_updates(self) -> None:
+        """Periodic check for new data to update auto-scroll or totals."""
         self._update_status()
 
-        # Auto-scroll if enabled and at bottom
-        if self._auto_scroll and not self._table.underMouse():
-            scrollbar = self._table.verticalScrollBar()
-            if scrollbar:
-                scrollbar.setValue(scrollbar.maximum())
+        # If auto-scroll is on and we are at the bottom, try to load more
+        if self._auto_scroll:
+            logger.info("Auto-scroll check")
+            if self._model.has_more():
+                self._load_more_signals()
+
+                # Scroll to bottom
+                scrollbar = self._table.verticalScrollBar()
+                if scrollbar:
+                    scrollbar.setValue(scrollbar.maximum())
 
     def _on_scroll(self, value: int) -> None:
         """
         Handle scroll events for infinite scroll pagination.
-
-        When user scrolls near bottom of loaded data, load more signals.
         """
         scrollbar = self._table.verticalScrollBar()
         if not scrollbar:
@@ -688,7 +632,7 @@ class LogTableWidget(QWidget):
 
         if loaded > 0:
             self._update_status()
-            logger.debug(f"Loaded {loaded} more signals via infinite scroll")
+            logger.debug(f"Loaded {loaded} more signals")
 
     def _on_more_available(self) -> None:
         """Handle notification that more data is available to load."""
@@ -705,23 +649,8 @@ class LogTableWidget(QWidget):
         self._update_status()
         self._update_load_all_button()
 
-    def set_parsing_state(self, is_parsing: bool) -> None:
-        """
-        Set parsing state to adjust update behavior.
-
-        When parsing completes, forces a final flush of pending signals.
-        """
-        was_parsing = self._is_parsing
-        self._is_parsing = is_parsing
-
-        # On parsing complete, flush all pending
-        if was_parsing and not is_parsing:
-            self._flush_pending_signals()
-
     def clear(self) -> None:
-        """Clear all signals from the table and buffers."""
-        self._pending_signals.clear()
-        self._pending_count = 0
+        """Clear all signals."""
         self._model.clear()
         self._update_status()
         self._update_load_all_button()
@@ -740,15 +669,11 @@ class LogTableWidget(QWidget):
 
     def _on_filter_changed(self, text: str) -> None:
         """Handle filter text changes."""
-        # Flush pending before applying filter
-        self._flush_pending_signals()
         self._model.set_filter(text)
         self._update_status()
 
     def _on_signal_filter_changed(self, signal_names: list[str]) -> None:
         """Handle signal filter changes from panel."""
-        # Flush pending before applying filter
-        self._flush_pending_signals()
         self._model.set_signal_filter(signal_names)
         self._update_status()
 
@@ -771,7 +696,6 @@ class LogTableWidget(QWidget):
         total = self._model.total_count
         loaded = self._model.loaded_count
         filtered = self._model.filtered_count
-        pending = self._pending_count
 
         # Build status parts
         parts = []
@@ -781,10 +705,6 @@ class LogTableWidget(QWidget):
             parts.append(f"{loaded:,} of {total:,} loaded")
         else:
             parts.append(f"{total:,} signals")
-
-        # Pending indicator
-        if pending > 0:
-            parts.append(f"+{pending:,} pending")
 
         # Filter indicator
         if self._model.has_signal_filter:
@@ -803,15 +723,10 @@ class LogTableWidget(QWidget):
 
     @property
     def signal_count(self) -> int:
-        """Get total signal count (including pending)."""
-        return self._model.total_count + self._pending_count
+        """Get total signal count."""
+        return self._model.total_count
 
     @property
     def loaded_count(self) -> int:
         """Get count of signals loaded into display."""
         return self._model.loaded_count
-
-    @property
-    def pending_count(self) -> int:
-        """Get count of pending signals not yet flushed."""
-        return self._pending_count

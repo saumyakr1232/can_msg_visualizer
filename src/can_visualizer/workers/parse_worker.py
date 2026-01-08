@@ -16,11 +16,11 @@ from pathlib import Path
 from typing import Optional
 from collections import deque
 
-from PySide6.QtCore import QThread, Signal, QMutex, QMutexLocker, Qt
+from PySide6.QtCore import QThread, Signal, QMutex, QMutexLocker
 
 from ..core.parser import CANParser
 from ..core.decoder import DBCDecoder
-from ..core.cache import CacheManager
+from ..core import DataStore
 from ..core.models import DecodedSignal, ParseProgress, ParseState
 from ..utils.logging_config import get_logger
 
@@ -44,7 +44,7 @@ class ParseWorker(QThread):
 
     # Signal types - use Qt.QueuedConnection for thread safety
     progress_updated = Signal(ParseProgress)
-    signals_decoded = Signal(list)  # List[DecodedSignal]
+    signals_decoded = Signal()
     parsing_started = Signal()
     parsing_completed = Signal(str)  # cache_key
     parsing_cancelled = Signal()
@@ -52,15 +52,14 @@ class ParseWorker(QThread):
     counting_started = Signal()  # Emitted when counting messages
 
     # Smaller batches for responsive UI
-    SIGNAL_BATCH_SIZE = 100  # Reduced from 1000
-    PROGRESS_UPDATE_INTERVAL = 0.05  # 50ms for smooth progress bar
-    MESSAGE_BATCH_SIZE = 5  # Process messages in batches
+    SIGNAL_BATCH_SIZE = 1000  # Reduced from 1000
+    PROGRESS_UPDATE_INTERVAL = 0.2  # 200ms for smooth progress bar
 
     def __init__(
         self,
         trace_path: Path,
         dbc_path: Path,
-        cache_manager: CacheManager,
+        data_store: DataStore,
         parent=None,
     ):
         """
@@ -76,7 +75,7 @@ class ParseWorker(QThread):
 
         self._trace_path = trace_path
         self._dbc_path = dbc_path
-        self._cache_manager = cache_manager
+        self._data_store = data_store
 
         self._cancel_mutex = QMutex()
         self._cancelled = False
@@ -122,18 +121,6 @@ class ParseWorker(QThread):
         parser = CANParser(self._trace_path)
         decoder = DBCDecoder(self._dbc_path)
 
-        # Generate cache key
-        self._cache_key = self._cache_manager.generate_cache_key(
-            parser.get_cache_key(),
-            decoder.get_cache_key(),
-        )
-
-        # Check for existing cache
-        if self._cache_manager.has_cache(self._cache_key):
-            logger.info("Using cached data - skipping parse")
-            self._load_from_cache(start_time)
-            return
-
         # Count messages first for accurate progress
         self.counting_started.emit()
         self._progress.state = ParseState.PARSING
@@ -162,7 +149,6 @@ class ParseWorker(QThread):
         signal_batch: list[DecodedSignal] = []
         all_signals: deque[DecodedSignal] = deque()  # Use deque for efficient appends
         last_progress_time = time.time()
-        last_emit_time = time.time()
 
         # Stream through messages
         for msg in parser.iterate_messages():
@@ -184,17 +170,10 @@ class ParseWorker(QThread):
 
             current_time = time.time()
 
-            # Emit signal batch - use smaller batches or time-based
-            should_emit_signals = (
-                len(signal_batch) >= self.SIGNAL_BATCH_SIZE
-                or (signal_batch and current_time - last_emit_time >= 0.03)  # 30ms
-            )
-
-            if should_emit_signals:
-                self.signals_decoded.emit(list(signal_batch))
+            if len(signal_batch) >= self.SIGNAL_BATCH_SIZE:
+                self._data_store.add_data(list(signal_batch))
+                self.signals_decoded.emit()
                 signal_batch.clear()
-                last_emit_time = current_time
-
                 # Small sleep to let UI process
                 self.msleep(1)
 
@@ -206,7 +185,8 @@ class ParseWorker(QThread):
 
         # Emit remaining signals
         if signal_batch:
-            self.signals_decoded.emit(list(signal_batch))
+            self._data_store.add_data(list(signal_batch))
+            self.signals_decoded.emit()
 
         # Final progress update
         self._progress.elapsed_seconds = time.time() - start_time
@@ -216,83 +196,11 @@ class ParseWorker(QThread):
         self._progress.state = ParseState.COMPLETED
         self.progress_updated.emit(self._progress)
 
-        # Cache results in background
-        self._cache_results(list(all_signals))
-
         logger.info(
             f"Parsing completed: {self._progress.decoded_messages} messages "
             f"in {self._progress.elapsed_seconds:.2f}s "
             f"({self._progress.decode_rate:.0f} msg/s)"
         )
-
-        self.parsing_completed.emit(self._cache_key)
-
-    def _load_from_cache(self, start_time: float) -> None:
-        """Load and stream data from cache with responsive updates."""
-        self.parsing_started.emit()
-
-        self._progress.state = ParseState.PARSING
-        total = self._cache_manager.get_signal_count(self._cache_key)
-        self._progress.total_messages = total
-        self.progress_updated.emit(self._progress)
-
-        signal_batch: list[DecodedSignal] = []
-        last_progress_time = time.time()
-        last_emit_time = time.time()
-
-        for signal in self._cache_manager.load_signals(self._cache_key):
-            if self._is_cancelled():
-                self._handle_cancellation()
-                return
-
-            signal_batch.append(signal)
-            self._progress.processed_messages += 1
-            self._progress.decoded_messages += 1
-
-            current_time = time.time()
-
-            # Emit batch - smaller batches for responsiveness
-            should_emit = len(signal_batch) >= self.SIGNAL_BATCH_SIZE or (
-                signal_batch and current_time - last_emit_time >= 0.03
-            )
-
-            if should_emit:
-                self.signals_decoded.emit(list(signal_batch))
-                signal_batch.clear()
-                last_emit_time = current_time
-                self.msleep(1)  # Let UI breathe
-
-            # Progress update
-            if current_time - last_progress_time >= self.PROGRESS_UPDATE_INTERVAL:
-                self._progress.elapsed_seconds = current_time - start_time
-                self.progress_updated.emit(self._progress)
-                last_progress_time = current_time
-
-        # Remaining signals
-        if signal_batch:
-            self.signals_decoded.emit(list(signal_batch))
-
-        self._progress.elapsed_seconds = time.time() - start_time
-        self._progress.state = ParseState.COMPLETED
-        self.progress_updated.emit(self._progress)
-
-        logger.info(f"Loaded {self._progress.decoded_messages} signals from cache")
-        self.parsing_completed.emit(self._cache_key)
-
-    def _cache_results(self, signals: list[DecodedSignal]) -> None:
-        """Store parsed results in cache."""
-        if not signals:
-            return
-
-        try:
-            self._cache_manager.store_signals(
-                self._cache_key,
-                iter(signals),
-                self._trace_path.name,
-                self._dbc_path.name,
-            )
-        except Exception as e:
-            logger.warning(f"Failed to cache results: {e}")
 
     def _handle_cancellation(self) -> None:
         """Handle graceful cancellation."""

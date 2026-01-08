@@ -4,6 +4,7 @@ from .models import CANMessage, DecodedSignal, ParseProgress
 from .parser import CANParser
 from .decoder import DBCDecoder
 from .cache import CacheManager
+from .data_store import DataStore
 
 __all__ = [
     "CANMessage",
@@ -12,4 +13,5 @@ __all__ = [
     "CANParser",
     "DBCDecoder",
     "CacheManager",
+    "DataStore",
 ]
