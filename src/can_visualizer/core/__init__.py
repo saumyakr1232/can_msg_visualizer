@@ -7,10 +7,9 @@ from .cache import CacheManager
 
 __all__ = [
     "CANMessage",
-    "DecodedSignal", 
+    "DecodedSignal",
     "ParseProgress",
     "CANParser",
     "DBCDecoder",
     "CacheManager",
 ]
-

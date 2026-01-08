@@ -13,7 +13,7 @@ Features:
 
 from typing import Optional
 import numpy as np
-from PySide6.QtCore import Qt, Signal, Slot, QTimer, QPoint
+from PySide6.QtCore import Qt, Signal, Slot, QTimer
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -23,7 +23,6 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QFrame,
     QSizePolicy,
-    QGroupBox,
     QSplitter,
     QListWidget,
     QListWidgetItem,
@@ -35,13 +34,11 @@ from PySide6.QtGui import (
     QFont,
     QPainter,
     QPen,
-    QBrush,
     QFontMetrics,
     QCursor,
     QWheelEvent,
     QMouseEvent,
 )
-import pyqtgraph as pg
 
 from ..core.models import DecodedSignal, SignalDefinition
 from ..utils.logging_config import get_logger
