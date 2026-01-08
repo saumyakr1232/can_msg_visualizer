@@ -2,10 +2,11 @@
 DBC-based CAN signal decoder.
 
 Uses cantools library to decode raw CAN data into physical signal values.
+Includes standalone functions for multiprocessing support.
 """
 
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Iterator
 import cantools
 from cantools.database import Message as DBCMessage
 
@@ -18,6 +19,102 @@ from .models import (
 )
 
 logger = get_logger("decoder")
+
+
+# Type alias for signal tuple (used in multiprocessing for efficient serialization)
+SignalTuple = tuple[float, str, int, str, int, float, str]
+# (timestamp, message_name, message_id, signal_name, raw_value, physical_value, unit)
+
+
+def signal_tuple_to_decoded(signal_tuple: SignalTuple) -> DecodedSignal:
+    """
+    Convert a signal tuple to a DecodedSignal object.
+    
+    Used when receiving results from multiprocessing decode pool.
+    
+    Args:
+        signal_tuple: (timestamp, message_name, message_id, signal_name, 
+                       raw_value, physical_value, unit)
+    
+    Returns:
+        DecodedSignal object
+    """
+    return DecodedSignal(
+        timestamp=signal_tuple[0],
+        message_name=signal_tuple[1],
+        message_id=signal_tuple[2],
+        signal_name=signal_tuple[3],
+        raw_value=signal_tuple[4],
+        physical_value=signal_tuple[5],
+        unit=signal_tuple[6],
+    )
+
+
+def signal_tuples_to_decoded(signal_tuples: list[SignalTuple]) -> list[DecodedSignal]:
+    """
+    Convert a list of signal tuples to DecodedSignal objects.
+    
+    Args:
+        signal_tuples: List of signal tuples from decode pool
+        
+    Returns:
+        List of DecodedSignal objects
+    """
+    return [signal_tuple_to_decoded(t) for t in signal_tuples]
+
+
+def decoded_to_signal_tuple(signal: DecodedSignal) -> SignalTuple:
+    """
+    Convert a DecodedSignal to a tuple for efficient serialization.
+    
+    Args:
+        signal: DecodedSignal object
+        
+    Returns:
+        Signal tuple for IPC
+    """
+    return (
+        signal.timestamp,
+        signal.message_name,
+        signal.message_id,
+        signal.signal_name,
+        signal.raw_value,
+        signal.physical_value,
+        signal.unit,
+    )
+
+
+def message_to_tuple(msg: CANMessage) -> tuple:
+    """
+    Convert a CANMessage to a tuple for efficient serialization.
+    
+    Args:
+        msg: CANMessage object
+        
+    Returns:
+        Message tuple (timestamp, arbitration_id, data, is_extended_id, channel)
+    """
+    return (
+        msg.timestamp,
+        msg.arbitration_id,
+        bytes(msg.data),
+        msg.is_extended_id,
+        msg.channel,
+    )
+
+
+def messages_to_tuples(messages: Iterator[CANMessage]) -> Iterator[tuple]:
+    """
+    Convert an iterator of CANMessages to tuples.
+    
+    Args:
+        messages: Iterator of CANMessage objects
+        
+    Yields:
+        Message tuples for IPC
+    """
+    for msg in messages:
+        yield message_to_tuple(msg)
 
 
 class DBCDecoder:

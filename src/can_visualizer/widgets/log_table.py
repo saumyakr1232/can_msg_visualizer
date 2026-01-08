@@ -2,11 +2,15 @@
 CAN Message Log Table Widget.
 
 High-performance table view for streaming decoded CAN signals.
-Designed to handle millions of rows efficiently using virtual scrolling.
+Designed to handle millions of rows efficiently using:
+- Virtual scrolling (Qt only requests visible rows)
+- Lazy UI updates (buffer signals, update on timer/scroll)
+- Incremental row insertion when possible
 """
 
 from typing import Optional
-from PySide6.QtCore import Qt, QAbstractTableModel, QModelIndex, Signal, Slot
+from collections import deque
+from PySide6.QtCore import Qt, QAbstractTableModel, QModelIndex, Signal, Slot, QTimer
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -20,10 +24,11 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QSplitter,
     QFrame,
+    QAbstractScrollArea,
 )
-from PySide6.QtGui import QColor, QFont
+from PySide6.QtGui import QColor
 
-from ..core.models import DecodedSignal, SignalDefinition
+from ..core.models import DecodedSignal
 from ..utils.logging_config import get_logger
 
 logger = get_logger("log_table")
@@ -35,6 +40,9 @@ class SignalTableModel(QAbstractTableModel):
     
     Uses virtual scrolling - Qt only requests visible rows,
     so we can handle millions of signals without memory issues.
+    
+    Supports both incremental updates and full reset for optimal
+    performance in different scenarios.
     """
     
     COLUMNS = [
@@ -49,6 +57,9 @@ class SignalTableModel(QAbstractTableModel):
     
     # Maximum rows to keep in memory for live view
     MAX_ROWS = 500_000
+    
+    # Threshold for using incremental vs reset update
+    INCREMENTAL_THRESHOLD = 5000
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -128,6 +139,38 @@ class SignalTableModel(QAbstractTableModel):
         
         return str(section + 1)
     
+    def add_signals_incremental(self, signals: list[DecodedSignal]) -> bool:
+        """
+        Add signals using incremental row insertion.
+        
+        More efficient for small batches as it doesn't reset the entire model.
+        Returns True if successful, False if trimming was needed (use reset instead).
+        """
+        if not signals:
+            return True
+        
+        current_count = len(self._signals)
+        new_count = len(signals)
+        total = current_count + new_count
+        
+        # If we need to trim, fall back to reset-based update
+        if total > self.MAX_ROWS:
+            return False
+        
+        # If filter is active, we need to recalculate indices - use reset
+        if self._filter_text or self._signal_filter:
+            return False
+        
+        # Incremental insert
+        first_row = current_count
+        last_row = current_count + new_count - 1
+        
+        self.beginInsertRows(QModelIndex(), first_row, last_row)
+        self._signals.extend(signals)
+        self.endInsertRows()
+        
+        return True
+    
     def add_signals(self, signals: list[DecodedSignal]) -> None:
         """
         Add new signals to the model.
@@ -135,40 +178,40 @@ class SignalTableModel(QAbstractTableModel):
         Handles memory management by trimming old entries
         when MAX_ROWS is exceeded.
         
-        Optimized for streaming: defers filter until necessary.
+        Uses incremental update for small batches, reset for large.
         """
         if not signals:
             return
         
-        # Check if we need to trim
+        # Try incremental update first (faster for small batches)
+        if len(signals) < self.INCREMENTAL_THRESHOLD:
+            if self.add_signals_incremental(signals):
+                return
+        
+        # Fall back to reset-based update
         current_count = len(self._signals)
         new_count = len(signals)
         total = current_count + new_count
         
+        self.beginResetModel()
+        
         if total > self.MAX_ROWS:
-            # Trim oldest entries - use reset for efficiency
+            # Trim oldest entries
             trim_count = total - self.MAX_ROWS
-            self.beginResetModel()
             if trim_count >= current_count:
                 self._signals = list(signals[-self.MAX_ROWS:])
             else:
                 self._signals = self._signals[trim_count:] + list(signals)
-            # Only apply filter if active
-            if self._filter_text or self._signal_filter:
-                self._apply_filter()
-            else:
-                self._filtered_indices = None
-            self.endResetModel()
         else:
-            # Simple append - faster path
-            self.beginResetModel()
             self._signals.extend(signals)
-            # Only apply filter if active
-            if self._filter_text or self._signal_filter:
-                self._apply_filter()
-            else:
-                self._filtered_indices = None
-            self.endResetModel()
+        
+        # Only apply filter if active
+        if self._filter_text or self._signal_filter:
+            self._apply_filter()
+        else:
+            self._filtered_indices = None
+        
+        self.endResetModel()
     
     def clear(self) -> None:
         """Clear all signals."""
@@ -376,14 +419,24 @@ class LogTableWidget(QWidget):
     
     Features:
     - High-performance virtual scrolling
-    - Real-time streaming updates
+    - Lazy UI updates (buffers signals, updates on timer/scroll)
     - Search/filter capability
     - Signal name filtering
     - Auto-scroll to latest
+    
+    Lazy Update Strategy:
+    - Incoming signals are buffered in a pending queue
+    - A timer flushes the buffer periodically (default 500ms)
+    - Scrolling or explicit refresh triggers immediate flush
+    - Parsing completion triggers final flush
     """
     
     signal_selected = Signal(DecodedSignal)
     add_filter_requested = Signal()  # Request to open signal selector
+    
+    # Lazy update configuration
+    UPDATE_TIMER_INTERVAL = 500  # ms between automatic updates
+    MAX_PENDING_SIGNALS = 50000  # Force flush if buffer exceeds this
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -391,7 +444,20 @@ class LogTableWidget(QWidget):
         self._model = SignalTableModel(self)
         self._auto_scroll = True
         
+        # Lazy update buffer
+        self._pending_signals: deque[DecodedSignal] = deque()
+        self._pending_count = 0
+        self._is_parsing = False
+        
+        # Update timer for lazy flushing
+        self._update_timer = QTimer(self)
+        self._update_timer.setInterval(self.UPDATE_TIMER_INTERVAL)
+        self._update_timer.timeout.connect(self._flush_pending_signals)
+        
         self._setup_ui()
+        
+        # Start the update timer
+        self._update_timer.start()
     
     def _setup_ui(self) -> None:
         """Initialize UI components."""
@@ -466,6 +532,11 @@ class LogTableWidget(QWidget):
         self._table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
         self._table.verticalHeader().setDefaultSectionSize(22)
         
+        # Connect scroll events for lazy update triggers
+        scrollbar = self._table.verticalScrollBar()
+        if scrollbar:
+            scrollbar.valueChanged.connect(self._on_scroll)
+        
         self._table.clicked.connect(self._on_row_clicked)
         table_layout.addWidget(self._table)
         
@@ -481,19 +552,79 @@ class LogTableWidget(QWidget):
     
     @Slot(list)
     def add_signals(self, signals: list[DecodedSignal]) -> None:
-        """Add new signals to the table (called from worker thread via signal)."""
-        self._model.add_signals(signals)
+        """
+        Add new signals to the pending buffer.
+        
+        Signals are buffered and flushed lazily to avoid blocking the UI
+        during rapid streaming. Called from worker thread via signal.
+        """
+        if not signals:
+            return
+        
+        # Add to pending buffer
+        self._pending_signals.extend(signals)
+        self._pending_count += len(signals)
+        
+        # Force flush if buffer is getting too large
+        if self._pending_count >= self.MAX_PENDING_SIGNALS:
+            self._flush_pending_signals()
+    
+    def _flush_pending_signals(self) -> None:
+        """
+        Flush pending signals to the model.
+        
+        Called by timer or triggered by scroll/completion events.
+        """
+        if not self._pending_signals:
+            return
+        
+        # Convert deque to list and clear
+        signals_to_add = list(self._pending_signals)
+        self._pending_signals.clear()
+        self._pending_count = 0
+        
+        # Add to model
+        self._model.add_signals(signals_to_add)
         self._update_status()
         
-        # Only scroll if auto-scroll enabled and table not being interacted with
+        # Auto-scroll if enabled and not interacting
         if self._auto_scroll and not self._table.underMouse():
-            # Use scrollToBottom sparingly - it can be expensive
             scrollbar = self._table.verticalScrollBar()
             if scrollbar:
                 scrollbar.setValue(scrollbar.maximum())
     
+    def _on_scroll(self, value: int) -> None:
+        """
+        Handle scroll events - trigger update if pending signals.
+        
+        This provides responsive updates when user scrolls during parsing.
+        """
+        # Only flush if there are pending signals and user is near bottom
+        if self._pending_signals:
+            scrollbar = self._table.verticalScrollBar()
+            if scrollbar:
+                # If user scrolled to near bottom, flush to show latest
+                at_bottom = value >= scrollbar.maximum() - 100
+                if at_bottom:
+                    self._flush_pending_signals()
+    
+    def set_parsing_state(self, is_parsing: bool) -> None:
+        """
+        Set parsing state to adjust update behavior.
+        
+        When parsing completes, forces a final flush of pending signals.
+        """
+        was_parsing = self._is_parsing
+        self._is_parsing = is_parsing
+        
+        # On parsing complete, flush all pending
+        if was_parsing and not is_parsing:
+            self._flush_pending_signals()
+    
     def clear(self) -> None:
-        """Clear all signals from the table."""
+        """Clear all signals from the table and pending buffer."""
+        self._pending_signals.clear()
+        self._pending_count = 0
         self._model.clear()
         self._update_status()
     
@@ -503,11 +634,15 @@ class LogTableWidget(QWidget):
     
     def _on_filter_changed(self, text: str) -> None:
         """Handle filter text changes."""
+        # Flush pending before applying filter
+        self._flush_pending_signals()
         self._model.set_filter(text)
         self._update_status()
     
     def _on_signal_filter_changed(self, signal_names: list[str]) -> None:
         """Handle signal filter changes from panel."""
+        # Flush pending before applying filter
+        self._flush_pending_signals()
         self._model.set_signal_filter(signal_names)
         self._update_status()
     
@@ -529,17 +664,27 @@ class LogTableWidget(QWidget):
         """Update status label."""
         total = self._model.total_count
         filtered = self._model.filtered_count
+        pending = self._pending_count
         
         filter_info = ""
         if self._model.has_signal_filter:
             filter_info = f" (filtering by {self._model.signal_filter_count} signal{'s' if self._model.signal_filter_count != 1 else ''})"
         
+        pending_info = ""
+        if pending > 0:
+            pending_info = f" (+{pending:,} pending)"
+        
         if total == filtered:
-            self._status_label.setText(f"{total:,} signals{filter_info}")
+            self._status_label.setText(f"{total:,} signals{pending_info}{filter_info}")
         else:
-            self._status_label.setText(f"{filtered:,} / {total:,} signals{filter_info}")
+            self._status_label.setText(f"{filtered:,} / {total:,} signals{pending_info}{filter_info}")
     
     @property
     def signal_count(self) -> int:
-        """Get total signal count."""
-        return self._model.total_count
+        """Get total signal count (including pending)."""
+        return self._model.total_count + self._pending_count
+    
+    @property
+    def pending_count(self) -> int:
+        """Get count of pending signals not yet flushed."""
+        return self._pending_count
