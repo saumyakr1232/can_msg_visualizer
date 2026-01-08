@@ -41,6 +41,7 @@ from .widgets.log_table import LogTableWidget
 from .widgets.plot_widget import PlotWidget
 from .widgets.state_diagram import StateDiagramWidget
 from .widgets.fullscreen_plot import FullscreenPlotWindow
+from .widgets.selected_signals import SelectedSignalsWidget
 from .utils.logging_config import get_logger
 
 logger = get_logger("app")
@@ -101,13 +102,22 @@ class MainWindow(QMainWindow):
         # Main splitter
         self._splitter = QSplitter(Qt.Orientation.Horizontal)
         
-        # Left panel - Signal Browser
-        left_panel = QGroupBox("DBC Signals")
+        # Left panel - Signal Browser and Selected Signals
+        left_panel = QWidget()
         left_layout = QVBoxLayout(left_panel)
-        left_layout.setContentsMargins(4, 4, 4, 4)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(4)
+        
+        # Vertical splitter for browser and selected signals
+        left_splitter = QSplitter(Qt.Orientation.Vertical)
+        
+        # DBC Signal Browser
+        browser_group = QGroupBox("DBC Signals")
+        browser_layout = QVBoxLayout(browser_group)
+        browser_layout.setContentsMargins(4, 4, 4, 4)
         
         self._signal_browser = SignalBrowserWidget()
-        left_layout.addWidget(self._signal_browser)
+        browser_layout.addWidget(self._signal_browser)
         
         # Buttons for browser
         browser_buttons = QHBoxLayout()
@@ -115,16 +125,30 @@ class MainWindow(QMainWindow):
         self._expand_btn.clicked.connect(self._signal_browser.expand_all)
         self._collapse_btn = QPushButton("Collapse All")
         self._collapse_btn.clicked.connect(self._signal_browser.collapse_all)
-        self._clear_sel_btn = QPushButton("Clear Selection")
-        self._clear_sel_btn.clicked.connect(self._signal_browser.clear_selection)
         
         browser_buttons.addWidget(self._expand_btn)
         browser_buttons.addWidget(self._collapse_btn)
-        browser_buttons.addWidget(self._clear_sel_btn)
-        left_layout.addLayout(browser_buttons)
+        browser_layout.addLayout(browser_buttons)
+        
+        left_splitter.addWidget(browser_group)
+        
+        # Selected Signals Panel
+        selected_group = QGroupBox("Selected Signals")
+        selected_layout = QVBoxLayout(selected_group)
+        selected_layout.setContentsMargins(4, 4, 4, 4)
+        
+        self._selected_signals_widget = SelectedSignalsWidget()
+        selected_layout.addWidget(self._selected_signals_widget)
+        
+        left_splitter.addWidget(selected_group)
+        
+        # Set initial splitter sizes (60% browser, 40% selected)
+        left_splitter.setSizes([300, 200])
+        
+        left_layout.addWidget(left_splitter)
         
         left_panel.setMinimumWidth(280)
-        left_panel.setMaximumWidth(400)
+        left_panel.setMaximumWidth(450)
         self._splitter.addWidget(left_panel)
         
         # Center panel - Tabs
@@ -267,8 +291,13 @@ class MainWindow(QMainWindow):
     
     def _connect_signals(self) -> None:
         """Connect widget signals."""
-        # Signal browser -> Plot
+        # Signal browser -> Selected signals panel and plot
         self._signal_browser.selection_changed.connect(self._on_signal_selection_changed)
+        
+        # Selected signals panel -> Signal browser (for removing signals)
+        self._selected_signals_widget.signal_removed.connect(self._on_signal_removed_from_panel)
+        self._selected_signals_widget.signals_cleared.connect(self._on_signals_cleared_from_panel)
+        self._selected_signals_widget.selection_changed.connect(self._on_selected_panel_changed)
         
         # Plot fullscreen request
         self._plot_widget.fullscreen_requested.connect(self._on_open_fullscreen)
@@ -509,13 +538,14 @@ class MainWindow(QMainWindow):
             # Load into signal browser
             self._signal_browser.load_dbc(self._decoder.message_definitions)
             
-            # Setup state diagram with signal definitions
+            # Setup signal definitions for state diagram and selected signals panel
             signal_defs = {}
             for msg in self._decoder.get_all_messages():
                 for sig in msg.signals:
                     full_name = f"{msg.name}.{sig.name}"
                     signal_defs[full_name] = sig
             self._state_diagram.set_signal_definitions(signal_defs)
+            self._selected_signals_widget.set_signal_definitions(signal_defs)
             
             self._status_message.setText(
                 f"Loaded DBC: {self._decoder.message_count} messages, "
@@ -575,13 +605,29 @@ class MainWindow(QMainWindow):
             self._cache_manager,
         )
         
-        # Connect signals
-        self._parse_worker.parsing_started.connect(self._on_parsing_started)
-        self._parse_worker.progress_updated.connect(self._on_progress_updated)
-        self._parse_worker.signals_decoded.connect(self._on_signals_decoded)
-        self._parse_worker.parsing_completed.connect(self._on_parsing_completed)
-        self._parse_worker.parsing_cancelled.connect(self._on_parsing_cancelled)
-        self._parse_worker.parsing_error.connect(self._on_parsing_error)
+        # Connect signals with QueuedConnection for thread safety
+        # This ensures signals are processed in the main thread's event loop
+        self._parse_worker.counting_started.connect(
+            self._on_counting_started, Qt.ConnectionType.QueuedConnection
+        )
+        self._parse_worker.parsing_started.connect(
+            self._on_parsing_started, Qt.ConnectionType.QueuedConnection
+        )
+        self._parse_worker.progress_updated.connect(
+            self._on_progress_updated, Qt.ConnectionType.QueuedConnection
+        )
+        self._parse_worker.signals_decoded.connect(
+            self._on_signals_decoded, Qt.ConnectionType.QueuedConnection
+        )
+        self._parse_worker.parsing_completed.connect(
+            self._on_parsing_completed, Qt.ConnectionType.QueuedConnection
+        )
+        self._parse_worker.parsing_cancelled.connect(
+            self._on_parsing_cancelled, Qt.ConnectionType.QueuedConnection
+        )
+        self._parse_worker.parsing_error.connect(
+            self._on_parsing_error, Qt.ConnectionType.QueuedConnection
+        )
         
         # Start
         self._parse_worker.start()
@@ -597,18 +643,30 @@ class MainWindow(QMainWindow):
     # ================== Worker Signals ==================
     
     @Slot()
+    def _on_counting_started(self) -> None:
+        """Handle message counting phase."""
+        self._stop_action.setEnabled(True)
+        self._stop_btn.setEnabled(True)
+        self._progress_bar.setVisible(True)
+        self._progress_bar.setRange(0, 0)  # Indeterminate mode
+        self._status_message.setText("Counting messages...")
+    
+    @Slot()
     def _on_parsing_started(self) -> None:
         """Handle parse start."""
         self._stop_action.setEnabled(True)
         self._stop_btn.setEnabled(True)
         self._progress_bar.setVisible(True)
+        self._progress_bar.setRange(0, 100)  # Determinate mode
         self._progress_bar.setValue(0)
         self._status_message.setText("Parsing...")
     
     @Slot(ParseProgress)
     def _on_progress_updated(self, progress: ParseProgress) -> None:
         """Handle progress updates."""
-        self._progress_bar.setValue(int(progress.progress_percent))
+        # Cap progress at 100% to handle estimation errors
+        percent = min(100, max(0, int(progress.progress_percent)))
+        self._progress_bar.setValue(percent)
         self._msg_count_label.setText(f"Messages: {progress.decoded_messages:,}")
         self._rate_label.setText(f"Rate: {progress.decode_rate:,.0f} msg/s")
         
@@ -673,6 +731,9 @@ class MainWindow(QMainWindow):
         """Handle signal selection changes from browser."""
         full_names = [f"{msg}.{sig}" for msg, sig in selection]
         
+        # Update selected signals panel
+        self._selected_signals_widget.set_selected_signals(full_names)
+        
         # Update plot
         self._plot_widget.set_selected_signals(full_names)
         
@@ -681,6 +742,33 @@ class MainWindow(QMainWindow):
             self._fullscreen_window.set_selected_signals(full_names)
         
         logger.debug(f"Signal selection changed: {len(full_names)} signals")
+    
+    @Slot(str)
+    def _on_signal_removed_from_panel(self, full_name: str) -> None:
+        """Handle signal removal from selected signals panel."""
+        # Parse full name back to message.signal
+        parts = full_name.split(".", 1)
+        if len(parts) == 2:
+            # Uncheck in signal browser - this will trigger selection_changed
+            self._signal_browser.clear_selection()
+            # Re-select remaining signals
+            remaining = self._selected_signals_widget.get_selected_signals()
+            self._signal_browser.select_signals(remaining)
+    
+    @Slot()
+    def _on_signals_cleared_from_panel(self) -> None:
+        """Handle clear all from selected signals panel."""
+        self._signal_browser.clear_selection()
+    
+    @Slot(list)
+    def _on_selected_panel_changed(self, full_names: list[str]) -> None:
+        """Handle selection change from the selected signals panel."""
+        # Update plot directly
+        self._plot_widget.set_selected_signals(full_names)
+        
+        # Update fullscreen window
+        if self._fullscreen_window and self._fullscreen_window.isVisible():
+            self._fullscreen_window.set_selected_signals(full_names)
     
     # ================== View Actions ==================
     

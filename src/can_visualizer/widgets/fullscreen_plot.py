@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QLabel,
 )
-from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtGui import QKeySequence, QShortcut, QFont
 import pyqtgraph as pg
 
 from ..core.models import DecodedSignal
@@ -55,8 +55,15 @@ class FullscreenPlotWindow(QMainWindow):
         self._plot_items: dict[str, pg.PlotDataItem] = {}
         self._selected_signals: list[str] = []
         
+        # Crosshair and tooltip components
+        self._vline: Optional[pg.InfiniteLine] = None
+        self._hline: Optional[pg.InfiniteLine] = None
+        self._tooltip: Optional[pg.TextItem] = None
+        self._crosshair_enabled = True
+        
         self._setup_ui()
         self._setup_shortcuts()
+        self._setup_crosshair()
     
     def _setup_ui(self) -> None:
         """Initialize UI components."""
@@ -116,6 +123,12 @@ class FullscreenPlotWindow(QMainWindow):
         self._legend_checkbox.setChecked(True)
         self._legend_checkbox.toggled.connect(self._on_legend_toggled)
         toolbar.addWidget(self._legend_checkbox)
+        
+        # Crosshair toggle
+        self._crosshair_checkbox = QCheckBox("Crosshair")
+        self._crosshair_checkbox.setChecked(True)
+        self._crosshair_checkbox.toggled.connect(self._on_crosshair_toggled)
+        toolbar.addWidget(self._crosshair_checkbox)
         
         # Auto-range
         self._auto_range_btn = QPushButton("📐 Auto Range")
@@ -310,4 +323,147 @@ class FullscreenPlotWindow(QMainWindow):
         """Handle window close."""
         self.closed.emit()
         super().closeEvent(event)
+    
+    def _setup_crosshair(self) -> None:
+        """Setup crosshair cursor and tooltip for hover information."""
+        plot_item = self._plot_widget.getPlotItem()
+        
+        # Vertical crosshair line
+        self._vline = pg.InfiniteLine(
+            angle=90, 
+            movable=False, 
+            pen=pg.mkPen('#888888', width=1, style=Qt.PenStyle.DashLine)
+        )
+        self._vline.setZValue(1000)
+        plot_item.addItem(self._vline, ignoreBounds=True)
+        
+        # Horizontal crosshair line
+        self._hline = pg.InfiniteLine(
+            angle=0, 
+            movable=False, 
+            pen=pg.mkPen('#888888', width=1, style=Qt.PenStyle.DashLine)
+        )
+        self._hline.setZValue(1000)
+        plot_item.addItem(self._hline, ignoreBounds=True)
+        
+        # Tooltip text item
+        self._tooltip = pg.TextItem(
+            text='',
+            color='#E0E0E0',
+            fill=pg.mkBrush('#2D2D2D'),
+            border=pg.mkPen('#555555'),
+            anchor=(0, 1),
+        )
+        self._tooltip.setZValue(1001)
+        self._tooltip.setFont(QFont('Consolas', 9))
+        plot_item.addItem(self._tooltip, ignoreBounds=True)
+        self._tooltip.hide()
+        
+        # Connect mouse move signal
+        self._proxy = pg.SignalProxy(
+            self._plot_widget.scene().sigMouseMoved,
+            rateLimit=60,
+            slot=self._on_mouse_moved
+        )
+        self._plot_widget.scene().sigMouseMoved.connect(self._check_mouse_in_plot)
+    
+    def _on_mouse_moved(self, evt) -> None:
+        """Handle mouse movement for crosshair and tooltip updates."""
+        if not self._crosshair_enabled:
+            return
+        
+        pos = evt[0]
+        plot_item = self._plot_widget.getPlotItem()
+        vb = plot_item.vb
+        
+        if not plot_item.sceneBoundingRect().contains(pos):
+            self._hide_crosshair()
+            return
+        
+        mouse_point = vb.mapSceneToView(pos)
+        x_pos = mouse_point.x()
+        y_pos = mouse_point.y()
+        
+        self._vline.setPos(x_pos)
+        self._hline.setPos(y_pos)
+        self._vline.show()
+        self._hline.show()
+        
+        # Find closest data points
+        tooltip_lines = [f"Time: {x_pos:.6f} s"]
+        
+        for name in self._selected_signals:
+            if name not in self._signal_data:
+                continue
+            
+            timestamps, values = self._signal_data[name]
+            if not timestamps:
+                continue
+            
+            x_arr = np.array(timestamps)
+            y_arr = np.array(values)
+            
+            idx = np.searchsorted(x_arr, x_pos)
+            
+            if idx == 0:
+                closest_idx = 0
+            elif idx >= len(x_arr):
+                closest_idx = len(x_arr) - 1
+            else:
+                if abs(x_arr[idx] - x_pos) < abs(x_arr[idx - 1] - x_pos):
+                    closest_idx = idx
+                else:
+                    closest_idx = idx - 1
+            
+            signal_name = name.split('.')[-1]
+            value = y_arr[closest_idx]
+            timestamp = x_arr[closest_idx]
+            
+            dt = timestamp - x_pos
+            if abs(dt) < 0.001:
+                tooltip_lines.append(f"{signal_name}: {value:.4g}")
+            else:
+                tooltip_lines.append(f"{signal_name}: {value:.4g} (Δt={dt:+.4f}s)")
+        
+        if len(tooltip_lines) > 1:
+            self._tooltip.setText('\n'.join(tooltip_lines))
+            
+            view_range = vb.viewRange()
+            x_range = view_range[0]
+            y_range = view_range[1]
+            
+            x_offset = (x_range[1] - x_range[0]) * 0.02
+            y_offset = (y_range[1] - y_range[0]) * 0.02
+            
+            if x_pos > (x_range[0] + x_range[1]) / 2:
+                self._tooltip.setAnchor((1, 1))
+                self._tooltip.setPos(x_pos - x_offset, y_pos + y_offset)
+            else:
+                self._tooltip.setAnchor((0, 1))
+                self._tooltip.setPos(x_pos + x_offset, y_pos + y_offset)
+            
+            self._tooltip.show()
+        else:
+            self._tooltip.hide()
+    
+    def _check_mouse_in_plot(self, pos) -> None:
+        """Hide crosshair when mouse leaves plot area."""
+        plot_item = self._plot_widget.getPlotItem()
+        if not plot_item.sceneBoundingRect().contains(pos):
+            self._hide_crosshair()
+    
+    def _hide_crosshair(self) -> None:
+        """Hide crosshair and tooltip."""
+        if self._vline:
+            self._vline.hide()
+        if self._hline:
+            self._hline.hide()
+        if self._tooltip:
+            self._tooltip.hide()
+    
+    def _on_crosshair_toggled(self, checked: bool) -> None:
+        """Toggle crosshair and tooltip visibility."""
+        self._crosshair_enabled = checked
+        if not checked:
+            self._hide_crosshair()
 

@@ -5,6 +5,7 @@ from .log_table import LogTableWidget
 from .plot_widget import PlotWidget
 from .state_diagram import StateDiagramWidget
 from .fullscreen_plot import FullscreenPlotWindow
+from .selected_signals import SelectedSignalsWidget
 
 __all__ = [
     "SignalBrowserWidget",
@@ -12,5 +13,6 @@ __all__ = [
     "PlotWidget",
     "StateDiagramWidget",
     "FullscreenPlotWindow",
+    "SelectedSignalsWidget",
 ]
 

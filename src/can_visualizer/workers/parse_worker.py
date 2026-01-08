@@ -3,13 +3,20 @@ Background worker thread for CAN file parsing.
 
 Handles asynchronous parsing and decoding with progress updates
 using Qt signal-slot mechanism for thread-safe UI communication.
+
+Key design decisions for UI responsiveness:
+- Small signal batches (100 signals max) to prevent UI blocking
+- Frequent progress updates with accurate percentage
+- Queued connections for signal delivery
+- Pre-counting messages for accurate progress
 """
 
 import time
 from pathlib import Path
 from typing import Optional
+from collections import deque
 
-from PySide6.QtCore import QThread, Signal, QMutex, QMutexLocker
+from PySide6.QtCore import QThread, Signal, QMutex, QMutexLocker, Qt
 
 from ..core.parser import CANParser
 from ..core.decoder import DBCDecoder
@@ -25,28 +32,29 @@ class ParseWorker(QThread):
     Worker thread for parsing CAN trace files.
     
     Emits signals for:
-    - Progress updates (batched for UI performance)
-    - Decoded signal data (batched for plot updates)
+    - Progress updates (frequent, small overhead)
+    - Decoded signal data (small batches for responsive UI)
     - Completion and error states
     
-    Design decisions:
-    - Batched signal emission (every 1000 signals or 100ms)
-    - Cancellation support via mutex-protected flag
-    - Automatic caching on completion
-    - Memory-efficient streaming (never loads full file)
+    Threading strategy:
+    - All heavy work (parsing, decoding) in worker thread
+    - Small batches emitted frequently for smooth UI
+    - Pre-count messages for accurate progress
     """
     
-    # Signal types for thread-safe communication
+    # Signal types - use Qt.QueuedConnection for thread safety
     progress_updated = Signal(ParseProgress)
     signals_decoded = Signal(list)  # List[DecodedSignal]
     parsing_started = Signal()
     parsing_completed = Signal(str)  # cache_key
     parsing_cancelled = Signal()
     parsing_error = Signal(str)  # error message
+    counting_started = Signal()  # Emitted when counting messages
     
-    # Batching parameters
-    SIGNAL_BATCH_SIZE = 1000
-    PROGRESS_UPDATE_INTERVAL = 0.1  # seconds
+    # Smaller batches for responsive UI
+    SIGNAL_BATCH_SIZE = 100  # Reduced from 1000
+    PROGRESS_UPDATE_INTERVAL = 0.05  # 50ms for smooth progress bar
+    MESSAGE_BATCH_SIZE = 500  # Process messages in batches
     
     def __init__(
         self,
@@ -75,6 +83,9 @@ class ParseWorker(QThread):
         
         self._progress = ParseProgress()
         self._cache_key: Optional[str] = None
+        
+        # Set lower priority to keep UI responsive
+        self.setPriority(QThread.Priority.LowPriority)
     
     def cancel(self) -> None:
         """Request cancellation of parsing operation."""
@@ -106,7 +117,7 @@ class ParseWorker(QThread):
             self.parsing_error.emit(str(e))
     
     def _run_parsing(self, start_time: float) -> None:
-        """Internal parsing implementation."""
+        """Internal parsing implementation with optimized batching."""
         # Initialize parser and decoder
         parser = CANParser(self._trace_path)
         decoder = DBCDecoder(self._dbc_path)
@@ -123,17 +134,35 @@ class ParseWorker(QThread):
             self._load_from_cache(start_time)
             return
         
-        # Start fresh parse
+        # Count messages first for accurate progress
+        self.counting_started.emit()
+        self._progress.state = ParseState.PARSING
+        self._progress.total_messages = 0
+        self.progress_updated.emit(self._progress)
+        
+        # Count with progress callback
+        def count_progress(bytes_read: int, total_bytes: int):
+            if self._is_cancelled():
+                return
+        
+        total_messages = parser.count_messages(count_progress)
+        
+        if self._is_cancelled():
+            self._handle_cancellation()
+            return
+        
+        # Start actual parsing
         self.parsing_started.emit()
         
         self._progress.state = ParseState.PARSING
-        self._progress.total_messages = parser.estimate_message_count()
+        self._progress.total_messages = total_messages
         self.progress_updated.emit(self._progress)
         
         # Accumulators for batching
         signal_batch: list[DecodedSignal] = []
-        all_signals: list[DecodedSignal] = []  # For caching
+        all_signals: deque[DecodedSignal] = deque()  # Use deque for efficient appends
         last_progress_time = time.time()
+        last_emit_time = time.time()
         
         # Stream through messages
         for msg in parser.iterate_messages():
@@ -153,13 +182,23 @@ class ParseWorker(QThread):
             else:
                 self._progress.decode_errors += 1
             
-            # Emit signal batch
-            if len(signal_batch) >= self.SIGNAL_BATCH_SIZE:
-                self.signals_decoded.emit(signal_batch.copy())
-                signal_batch.clear()
-            
-            # Emit progress update
             current_time = time.time()
+            
+            # Emit signal batch - use smaller batches or time-based
+            should_emit_signals = (
+                len(signal_batch) >= self.SIGNAL_BATCH_SIZE or
+                (signal_batch and current_time - last_emit_time >= 0.03)  # 30ms
+            )
+            
+            if should_emit_signals:
+                self.signals_decoded.emit(list(signal_batch))
+                signal_batch.clear()
+                last_emit_time = current_time
+                
+                # Small sleep to let UI process
+                self.msleep(1)
+            
+            # Emit progress update frequently
             if current_time - last_progress_time >= self.PROGRESS_UPDATE_INTERVAL:
                 self._progress.elapsed_seconds = current_time - start_time
                 self.progress_updated.emit(self._progress)
@@ -167,15 +206,16 @@ class ParseWorker(QThread):
         
         # Emit remaining signals
         if signal_batch:
-            self.signals_decoded.emit(signal_batch)
+            self.signals_decoded.emit(list(signal_batch))
         
         # Final progress update
         self._progress.elapsed_seconds = time.time() - start_time
+        self._progress.total_messages = self._progress.processed_messages  # Fix final count
         self._progress.state = ParseState.COMPLETED
         self.progress_updated.emit(self._progress)
         
-        # Cache results
-        self._cache_results(all_signals)
+        # Cache results in background
+        self._cache_results(list(all_signals))
         
         logger.info(
             f"Parsing completed: {self._progress.decoded_messages} messages "
@@ -186,7 +226,7 @@ class ParseWorker(QThread):
         self.parsing_completed.emit(self._cache_key)
     
     def _load_from_cache(self, start_time: float) -> None:
-        """Load and stream data from cache."""
+        """Load and stream data from cache with responsive updates."""
         self.parsing_started.emit()
         
         self._progress.state = ParseState.PARSING
@@ -196,6 +236,7 @@ class ParseWorker(QThread):
         
         signal_batch: list[DecodedSignal] = []
         last_progress_time = time.time()
+        last_emit_time = time.time()
         
         for signal in self._cache_manager.load_signals(self._cache_key):
             if self._is_cancelled():
@@ -206,13 +247,21 @@ class ParseWorker(QThread):
             self._progress.processed_messages += 1
             self._progress.decoded_messages += 1
             
-            # Emit batch
-            if len(signal_batch) >= self.SIGNAL_BATCH_SIZE:
-                self.signals_decoded.emit(signal_batch.copy())
+            current_time = time.time()
+            
+            # Emit batch - smaller batches for responsiveness
+            should_emit = (
+                len(signal_batch) >= self.SIGNAL_BATCH_SIZE or
+                (signal_batch and current_time - last_emit_time >= 0.03)
+            )
+            
+            if should_emit:
+                self.signals_decoded.emit(list(signal_batch))
                 signal_batch.clear()
+                last_emit_time = current_time
+                self.msleep(1)  # Let UI breathe
             
             # Progress update
-            current_time = time.time()
             if current_time - last_progress_time >= self.PROGRESS_UPDATE_INTERVAL:
                 self._progress.elapsed_seconds = current_time - start_time
                 self.progress_updated.emit(self._progress)
@@ -220,7 +269,7 @@ class ParseWorker(QThread):
         
         # Remaining signals
         if signal_batch:
-            self.signals_decoded.emit(signal_batch)
+            self.signals_decoded.emit(list(signal_batch))
         
         self._progress.elapsed_seconds = time.time() - start_time
         self._progress.state = ParseState.COMPLETED
@@ -250,4 +299,3 @@ class ParseWorker(QThread):
         self.progress_updated.emit(self._progress)
         self.parsing_cancelled.emit()
         logger.info("Parsing cancelled by user")
-

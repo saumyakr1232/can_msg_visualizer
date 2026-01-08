@@ -129,6 +129,8 @@ class SignalTableModel(QAbstractTableModel):
         
         Handles memory management by trimming old entries
         when MAX_ROWS is exceeded.
+        
+        Optimized for streaming: defers filter until necessary.
         """
         if not signals:
             return
@@ -139,27 +141,29 @@ class SignalTableModel(QAbstractTableModel):
         total = current_count + new_count
         
         if total > self.MAX_ROWS:
-            # Trim oldest entries
+            # Trim oldest entries - use reset for efficiency
             trim_count = total - self.MAX_ROWS
+            self.beginResetModel()
             if trim_count >= current_count:
-                # Replace everything
-                self.beginResetModel()
-                self._signals = signals[-self.MAX_ROWS:]
-                self._apply_filter()
-                self.endResetModel()
+                self._signals = list(signals[-self.MAX_ROWS:])
             else:
-                # Partial trim
-                self.beginResetModel()
-                self._signals = self._signals[trim_count:] + signals
+                self._signals = self._signals[trim_count:] + list(signals)
+            # Only apply filter if active
+            if self._filter_text:
                 self._apply_filter()
-                self.endResetModel()
+            else:
+                self._filtered_indices = None
+            self.endResetModel()
         else:
-            # Simple append
-            first_new = self.rowCount()
-            self.beginInsertRows(QModelIndex(), first_new, first_new + new_count - 1)
+            # Simple append - faster path
+            self.beginResetModel()
             self._signals.extend(signals)
-            self._apply_filter()
-            self.endInsertRows()
+            # Only apply filter if active
+            if self._filter_text:
+                self._apply_filter()
+            else:
+                self._filtered_indices = None
+            self.endResetModel()
     
     def clear(self) -> None:
         """Clear all signals."""
@@ -304,8 +308,12 @@ class LogTableWidget(QWidget):
         self._model.add_signals(signals)
         self._update_status()
         
-        if self._auto_scroll:
-            self._table.scrollToBottom()
+        # Only scroll if auto-scroll enabled and table not being interacted with
+        if self._auto_scroll and not self._table.underMouse():
+            # Use scrollToBottom sparingly - it can be expensive
+            scrollbar = self._table.verticalScrollBar()
+            if scrollbar:
+                scrollbar.setValue(scrollbar.maximum())
     
     def clear(self) -> None:
         """Clear all signals from the table."""
