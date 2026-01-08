@@ -16,10 +16,14 @@ from PySide6.QtWidgets import (
     QLabel,
     QPushButton,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
+    QSplitter,
+    QFrame,
 )
 from PySide6.QtGui import QColor, QFont
 
-from ..core.models import DecodedSignal
+from ..core.models import DecodedSignal, SignalDefinition
 from ..utils.logging_config import get_logger
 
 logger = get_logger("log_table")
@@ -50,6 +54,7 @@ class SignalTableModel(QAbstractTableModel):
         super().__init__(parent)
         self._signals: list[DecodedSignal] = []
         self._filter_text: str = ""
+        self._signal_filter: set[str] = set()  # Filter by signal full names
         self._filtered_indices: Optional[list[int]] = None
     
     def rowCount(self, parent=QModelIndex()) -> int:
@@ -149,7 +154,7 @@ class SignalTableModel(QAbstractTableModel):
             else:
                 self._signals = self._signals[trim_count:] + list(signals)
             # Only apply filter if active
-            if self._filter_text:
+            if self._filter_text or self._signal_filter:
                 self._apply_filter()
             else:
                 self._filtered_indices = None
@@ -159,7 +164,7 @@ class SignalTableModel(QAbstractTableModel):
             self.beginResetModel()
             self._signals.extend(signals)
             # Only apply filter if active
-            if self._filter_text:
+            if self._filter_text or self._signal_filter:
                 self._apply_filter()
             else:
                 self._filtered_indices = None
@@ -179,17 +184,45 @@ class SignalTableModel(QAbstractTableModel):
         self._apply_filter()
         self.endResetModel()
     
+    def set_signal_filter(self, signal_names: list[str]) -> None:
+        """
+        Set filter by specific signal full names.
+        
+        Args:
+            signal_names: List of signal full names (e.g., "MessageName.SignalName")
+                         Empty list clears the filter.
+        """
+        self.beginResetModel()
+        self._signal_filter = set(signal_names)
+        self._apply_filter()
+        self.endResetModel()
+    
     def _apply_filter(self) -> None:
-        """Apply current filter to signals."""
-        if not self._filter_text:
+        """Apply current filters to signals."""
+        has_text_filter = bool(self._filter_text)
+        has_signal_filter = bool(self._signal_filter)
+        
+        if not has_text_filter and not has_signal_filter:
             self._filtered_indices = None
             return
         
-        self._filtered_indices = [
-            i for i, sig in enumerate(self._signals)
-            if (self._filter_text in sig.message_name.lower() or
-                self._filter_text in sig.signal_name.lower())
-        ]
+        indices = []
+        for i, sig in enumerate(self._signals):
+            # Check signal name filter first (if active)
+            if has_signal_filter:
+                full_name = f"{sig.message_name}.{sig.signal_name}"
+                if full_name not in self._signal_filter:
+                    continue
+            
+            # Then check text filter (if active)
+            if has_text_filter:
+                if not (self._filter_text in sig.message_name.lower() or
+                        self._filter_text in sig.signal_name.lower()):
+                    continue
+            
+            indices.append(i)
+        
+        self._filtered_indices = indices
     
     def get_signal(self, row: int) -> Optional[DecodedSignal]:
         """Get signal at given row (accounting for filter)."""
@@ -216,6 +249,125 @@ class SignalTableModel(QAbstractTableModel):
         if self._filtered_indices is not None:
             return len(self._filtered_indices)
         return len(self._signals)
+    
+    @property
+    def has_signal_filter(self) -> bool:
+        """Check if signal filter is active."""
+        return bool(self._signal_filter)
+    
+    @property
+    def signal_filter_count(self) -> int:
+        """Number of signals in the filter."""
+        return len(self._signal_filter)
+
+
+class MessageLogFilterPanel(QFrame):
+    """Left panel with signal filter controls for the message log."""
+    
+    add_filter_requested = Signal()
+    filter_changed = Signal(list)  # Emits list of signal full names
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._filter_signals: list[str] = []
+        self._setup_ui()
+    
+    def _setup_ui(self):
+        self.setStyleSheet("""
+            MessageLogFilterPanel {
+                background: #252526;
+                border-right: 1px solid #3D3D3D;
+            }
+        """)
+        
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
+        
+        # Add filter button
+        self._add_btn = QPushButton("➕ Add Filter")
+        self._add_btn.setMinimumHeight(36)
+        self._add_btn.clicked.connect(self.add_filter_requested.emit)
+        layout.addWidget(self._add_btn)
+        
+        # Active filters label
+        filters_label = QLabel("Active Filters:")
+        filters_label.setStyleSheet("color: #888; font-size: 11px; margin-top: 8px;")
+        layout.addWidget(filters_label)
+        
+        # Filters list
+        self._filters_list = QListWidget()
+        self._filters_list.setStyleSheet("""
+            QListWidget {
+                background: #1E1E1E;
+                border: 1px solid #3D3D3D;
+                border-radius: 4px;
+            }
+            QListWidget::item {
+                padding: 6px;
+                border-bottom: 1px solid #3D3D3D;
+            }
+            QListWidget::item:hover {
+                background: #2D2D2D;
+            }
+        """)
+        self._filters_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._filters_list.customContextMenuRequested.connect(self._show_context_menu)
+        layout.addWidget(self._filters_list)
+        
+        # Clear filters button
+        self._clear_btn = QPushButton("🗑️ Clear Filters")
+        self._clear_btn.clicked.connect(self._on_clear_filters)
+        layout.addWidget(self._clear_btn)
+        
+        layout.addStretch()
+        
+        # Status label
+        self._status_label = QLabel("Showing all signals")
+        self._status_label.setStyleSheet("color: #666; font-size: 10px;")
+        self._status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self._status_label)
+    
+    def set_filter_signals(self, signal_names: list[str]):
+        """Set the list of signals to filter by."""
+        self._filter_signals = list(signal_names)
+        self._update_list()
+        self.filter_changed.emit(self._filter_signals)
+    
+    def _update_list(self):
+        """Update the filters list widget."""
+        self._filters_list.clear()
+        
+        for full_name in self._filter_signals:
+            short_name = full_name.split(".")[-1]
+            item = QListWidgetItem(f"● {short_name}")
+            item.setData(Qt.ItemDataRole.UserRole, full_name)
+            item.setToolTip(full_name)
+            self._filters_list.addItem(item)
+        
+        if self._filter_signals:
+            self._status_label.setText(f"Showing {len(self._filter_signals)} signal{'s' if len(self._filter_signals) != 1 else ''}")
+        else:
+            self._status_label.setText("Showing all signals")
+    
+    def _show_context_menu(self, pos):
+        from PySide6.QtWidgets import QMenu
+        item = self._filters_list.itemAt(pos)
+        if item:
+            menu = QMenu(self)
+            remove_action = menu.addAction("Remove")
+            action = menu.exec(self._filters_list.mapToGlobal(pos))
+            if action == remove_action:
+                full_name = item.data(Qt.ItemDataRole.UserRole)
+                self._filter_signals = [s for s in self._filter_signals if s != full_name]
+                self._update_list()
+                self.filter_changed.emit(self._filter_signals)
+    
+    def _on_clear_filters(self):
+        """Clear all filters."""
+        self._filter_signals.clear()
+        self._update_list()
+        self.filter_changed.emit(self._filter_signals)
 
 
 class LogTableWidget(QWidget):
@@ -226,10 +378,12 @@ class LogTableWidget(QWidget):
     - High-performance virtual scrolling
     - Real-time streaming updates
     - Search/filter capability
+    - Signal name filtering
     - Auto-scroll to latest
     """
     
     signal_selected = Signal(DecodedSignal)
+    add_filter_requested = Signal()  # Request to open signal selector
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -241,17 +395,35 @@ class LogTableWidget(QWidget):
     
     def _setup_ui(self) -> None:
         """Initialize UI components."""
-        layout = QVBoxLayout(self)
+        layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(4)
+        layout.setSpacing(0)
+        
+        # Main splitter
+        self._splitter = QSplitter(Qt.Orientation.Horizontal)
+        
+        # Left panel - Filter controls
+        self._filter_panel = MessageLogFilterPanel()
+        self._filter_panel.setMinimumWidth(180)
+        self._filter_panel.setMaximumWidth(280)
+        self._filter_panel.add_filter_requested.connect(self.add_filter_requested.emit)
+        self._filter_panel.filter_changed.connect(self._on_signal_filter_changed)
+        self._splitter.addWidget(self._filter_panel)
+        
+        # Right panel - Table
+        table_container = QWidget()
+        table_layout = QVBoxLayout(table_container)
+        table_layout.setContentsMargins(0, 0, 0, 0)
+        table_layout.setSpacing(4)
         
         # Toolbar
         toolbar = QHBoxLayout()
+        toolbar.setContentsMargins(8, 8, 8, 8)
         toolbar.setSpacing(8)
         
         # Filter input
         self._filter_input = QLineEdit()
-        self._filter_input.setPlaceholderText("🔍 Filter by message or signal...")
+        self._filter_input.setPlaceholderText("🔍 Search by message or signal name...")
         self._filter_input.setClearButtonEnabled(True)
         self._filter_input.textChanged.connect(self._on_filter_changed)
         toolbar.addWidget(self._filter_input, stretch=1)
@@ -268,7 +440,7 @@ class LogTableWidget(QWidget):
         self._clear_btn.clicked.connect(self._on_clear_clicked)
         toolbar.addWidget(self._clear_btn)
         
-        layout.addLayout(toolbar)
+        table_layout.addLayout(toolbar)
         
         # Table view
         self._table = QTableView()
@@ -295,12 +467,17 @@ class LogTableWidget(QWidget):
         self._table.verticalHeader().setDefaultSectionSize(22)
         
         self._table.clicked.connect(self._on_row_clicked)
-        layout.addWidget(self._table)
+        table_layout.addWidget(self._table)
         
         # Status bar
         self._status_label = QLabel("0 signals")
-        self._status_label.setStyleSheet("color: #666; font-size: 11px;")
-        layout.addWidget(self._status_label)
+        self._status_label.setStyleSheet("color: #666; font-size: 11px; padding-left: 8px;")
+        table_layout.addWidget(self._status_label)
+        
+        self._splitter.addWidget(table_container)
+        self._splitter.setSizes([200, 600])
+        
+        layout.addWidget(self._splitter)
     
     @Slot(list)
     def add_signals(self, signals: list[DecodedSignal]) -> None:
@@ -320,9 +497,18 @@ class LogTableWidget(QWidget):
         self._model.clear()
         self._update_status()
     
+    def set_signal_filter(self, signal_names: list[str]) -> None:
+        """Set filter by specific signal full names."""
+        self._filter_panel.set_filter_signals(signal_names)
+    
     def _on_filter_changed(self, text: str) -> None:
         """Handle filter text changes."""
         self._model.set_filter(text)
+        self._update_status()
+    
+    def _on_signal_filter_changed(self, signal_names: list[str]) -> None:
+        """Handle signal filter changes from panel."""
+        self._model.set_signal_filter(signal_names)
         self._update_status()
     
     def _on_auto_scroll_toggled(self, checked: bool) -> None:
@@ -344,13 +530,16 @@ class LogTableWidget(QWidget):
         total = self._model.total_count
         filtered = self._model.filtered_count
         
+        filter_info = ""
+        if self._model.has_signal_filter:
+            filter_info = f" (filtering by {self._model.signal_filter_count} signal{'s' if self._model.signal_filter_count != 1 else ''})"
+        
         if total == filtered:
-            self._status_label.setText(f"{total:,} signals")
+            self._status_label.setText(f"{total:,} signals{filter_info}")
         else:
-            self._status_label.setText(f"{filtered:,} / {total:,} signals")
+            self._status_label.setText(f"{filtered:,} / {total:,} signals{filter_info}")
     
     @property
     def signal_count(self) -> int:
         """Get total signal count."""
         return self._model.total_count
-

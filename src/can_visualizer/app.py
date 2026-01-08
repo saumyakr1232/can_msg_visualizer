@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QMessageBox,
     QGroupBox,
+    QFrame,
 )
 from PySide6.QtGui import QAction, QKeySequence
 
@@ -42,9 +43,82 @@ from .widgets.plot_widget import PlotWidget
 from .widgets.state_diagram import StateDiagramWidget
 from .widgets.fullscreen_plot import FullscreenPlotWindow
 from .widgets.selected_signals import SelectedSignalsWidget
+from .widgets.signal_selector_dialog import SignalSelectorDialog
 from .utils.logging_config import get_logger
 
 logger = get_logger("app")
+
+
+class SignalPlotTab(QWidget):
+    """Signal Plot tab with its own left panel for DBC browser."""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        
+        # Main splitter
+        self._splitter = QSplitter(Qt.Orientation.Horizontal)
+        
+        # Left panel - Signal Browser and Selected Signals
+        left_panel = QWidget()
+        left_layout = QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(4, 4, 4, 4)
+        left_layout.setSpacing(4)
+        
+        # Vertical splitter for browser and selected signals
+        left_splitter = QSplitter(Qt.Orientation.Vertical)
+        
+        # DBC Signal Browser
+        browser_group = QGroupBox("DBC Signals")
+        browser_layout = QVBoxLayout(browser_group)
+        browser_layout.setContentsMargins(4, 4, 4, 4)
+        
+        self.signal_browser = SignalBrowserWidget()
+        browser_layout.addWidget(self.signal_browser)
+        
+        # Buttons for browser
+        browser_buttons = QHBoxLayout()
+        self._expand_btn = QPushButton("Expand All")
+        self._expand_btn.clicked.connect(self.signal_browser.expand_all)
+        self._collapse_btn = QPushButton("Collapse All")
+        self._collapse_btn.clicked.connect(self.signal_browser.collapse_all)
+        
+        browser_buttons.addWidget(self._expand_btn)
+        browser_buttons.addWidget(self._collapse_btn)
+        browser_layout.addLayout(browser_buttons)
+        
+        left_splitter.addWidget(browser_group)
+        
+        # Selected Signals Panel
+        selected_group = QGroupBox("Selected Signals")
+        selected_layout = QVBoxLayout(selected_group)
+        selected_layout.setContentsMargins(4, 4, 4, 4)
+        
+        self.selected_signals_widget = SelectedSignalsWidget()
+        selected_layout.addWidget(self.selected_signals_widget)
+        
+        left_splitter.addWidget(selected_group)
+        
+        # Set initial splitter sizes (60% browser, 40% selected)
+        left_splitter.setSizes([300, 200])
+        
+        left_layout.addWidget(left_splitter)
+        
+        left_panel.setMinimumWidth(250)
+        left_panel.setMaximumWidth(450)
+        self._splitter.addWidget(left_panel)
+        
+        # Right panel - Plot
+        self.plot_widget = PlotWidget()
+        self._splitter.addWidget(self.plot_widget)
+        
+        # Set splitter proportions
+        self._splitter.setSizes([280, 700])
+        
+        layout.addWidget(self._splitter)
 
 
 class MainWindow(QMainWindow):
@@ -52,8 +126,10 @@ class MainWindow(QMainWindow):
     Main application window.
     
     Layout:
-    - Left panel: DBC signal browser
-    - Center: Tab widget with Log Table, Plot, State Diagram
+    - Each tab has its own left panel with relevant controls:
+      - Signal Plot: DBC browser + selected signals | plot
+      - State Diagram: Timeline controls | timeline view
+      - Message Log: Signal filters | log table
     - Bottom: Status bar with progress
     
     Responsibilities:
@@ -95,83 +171,31 @@ class MainWindow(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
         
-        main_layout = QHBoxLayout(central)
+        main_layout = QVBoxLayout(central)
         main_layout.setContentsMargins(4, 4, 4, 4)
         main_layout.setSpacing(4)
         
-        # Main splitter
-        self._splitter = QSplitter(Qt.Orientation.Horizontal)
-        
-        # Left panel - Signal Browser and Selected Signals
-        left_panel = QWidget()
-        left_layout = QVBoxLayout(left_panel)
-        left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.setSpacing(4)
-        
-        # Vertical splitter for browser and selected signals
-        left_splitter = QSplitter(Qt.Orientation.Vertical)
-        
-        # DBC Signal Browser
-        browser_group = QGroupBox("DBC Signals")
-        browser_layout = QVBoxLayout(browser_group)
-        browser_layout.setContentsMargins(4, 4, 4, 4)
-        
-        self._signal_browser = SignalBrowserWidget()
-        browser_layout.addWidget(self._signal_browser)
-        
-        # Buttons for browser
-        browser_buttons = QHBoxLayout()
-        self._expand_btn = QPushButton("Expand All")
-        self._expand_btn.clicked.connect(self._signal_browser.expand_all)
-        self._collapse_btn = QPushButton("Collapse All")
-        self._collapse_btn.clicked.connect(self._signal_browser.collapse_all)
-        
-        browser_buttons.addWidget(self._expand_btn)
-        browser_buttons.addWidget(self._collapse_btn)
-        browser_layout.addLayout(browser_buttons)
-        
-        left_splitter.addWidget(browser_group)
-        
-        # Selected Signals Panel
-        selected_group = QGroupBox("Selected Signals")
-        selected_layout = QVBoxLayout(selected_group)
-        selected_layout.setContentsMargins(4, 4, 4, 4)
-        
-        self._selected_signals_widget = SelectedSignalsWidget()
-        selected_layout.addWidget(self._selected_signals_widget)
-        
-        left_splitter.addWidget(selected_group)
-        
-        # Set initial splitter sizes (60% browser, 40% selected)
-        left_splitter.setSizes([300, 200])
-        
-        left_layout.addWidget(left_splitter)
-        
-        left_panel.setMinimumWidth(280)
-        left_panel.setMaximumWidth(450)
-        self._splitter.addWidget(left_panel)
-        
-        # Center panel - Tabs
+        # Tabs - each tab has its own splitter layout
         self._tabs = QTabWidget()
         
-        # Log table tab
+        # Message Log Tab (with built-in filter panel)
         self._log_table = LogTableWidget()
         self._tabs.addTab(self._log_table, "📋 Message Log")
         
-        # Plot tab
-        self._plot_widget = PlotWidget()
-        self._tabs.addTab(self._plot_widget, "📈 Signal Plot")
+        # Signal Plot Tab (with DBC browser)
+        self._signal_plot_tab = SignalPlotTab()
+        self._tabs.addTab(self._signal_plot_tab, "📈 Signal Plot")
         
-        # State diagram tab
+        # State Diagram Tab (with built-in control panel)
         self._state_diagram = StateDiagramWidget()
         self._tabs.addTab(self._state_diagram, "📊 State Diagram")
         
-        self._splitter.addWidget(self._tabs)
+        main_layout.addWidget(self._tabs)
         
-        # Set splitter proportions
-        self._splitter.setSizes([300, 900])
-        
-        main_layout.addWidget(self._splitter)
+        # Shortcut references
+        self._signal_browser = self._signal_plot_tab.signal_browser
+        self._selected_signals_widget = self._signal_plot_tab.selected_signals_widget
+        self._plot_widget = self._signal_plot_tab.plot_widget
     
     def _setup_menu(self) -> None:
         """Setup application menu bar."""
@@ -301,6 +325,12 @@ class MainWindow(QMainWindow):
         
         # Plot fullscreen request
         self._plot_widget.fullscreen_requested.connect(self._on_open_fullscreen)
+        
+        # State diagram -> Signal selector dialog
+        self._state_diagram.add_signals_requested.connect(self._on_state_diagram_add_signals)
+        
+        # Message log filter -> Signal selector dialog
+        self._log_table.add_filter_requested.connect(self._on_message_log_add_filter)
     
     def _get_stylesheet(self) -> str:
         """Return application stylesheet."""
@@ -508,6 +538,20 @@ class MainWindow(QMainWindow):
             }
             QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
                 width: 0;
+            }
+            QListWidget {
+                background: #252526;
+                border: 1px solid #3D3D3D;
+                border-radius: 4px;
+            }
+            QListWidget::item {
+                padding: 6px;
+            }
+            QListWidget::item:hover {
+                background: #2D2D2D;
+            }
+            QListWidget::item:selected {
+                background: #0078D4;
             }
         """
     
@@ -792,12 +836,77 @@ class MainWindow(QMainWindow):
         """Handle fullscreen window close."""
         pass  # Keep reference for reuse
     
+    # ================== State Diagram ==================
+    
+    @Slot()
+    def _on_state_diagram_add_signals(self) -> None:
+        """Open signal selector dialog for state diagram."""
+        if not self._decoder:
+            QMessageBox.warning(
+                self,
+                "No DBC Loaded",
+                "Please load a DBC file first.",
+            )
+            return
+        
+        # Get signal definitions
+        signal_defs = {}
+        for msg in self._decoder.get_all_messages():
+            for sig in msg.signals:
+                full_name = f"{msg.name}.{sig.name}"
+                signal_defs[full_name] = sig
+        
+        # Get currently active signals
+        current_signals = self._state_diagram.get_active_signals()
+        
+        # Show dialog
+        selected = SignalSelectorDialog.select_signals(
+            signal_defs,
+            already_selected=current_signals,
+            parent=self,
+        )
+        
+        if selected is not None:
+            self._state_diagram.set_active_signals(selected)
+            logger.info(f"State diagram signals updated: {len(selected)} signals")
+    
+    # ================== Message Log Filter ==================
+    
+    @Slot()
+    def _on_message_log_add_filter(self) -> None:
+        """Open signal selector dialog for message log filter."""
+        if not self._decoder:
+            QMessageBox.warning(
+                self,
+                "No DBC Loaded",
+                "Please load a DBC file first.",
+            )
+            return
+        
+        # Get signal definitions
+        signal_defs = {}
+        for msg in self._decoder.get_all_messages():
+            for sig in msg.signals:
+                full_name = f"{msg.name}.{sig.name}"
+                signal_defs[full_name] = sig
+        
+        # Show dialog
+        selected = SignalSelectorDialog.select_signals(
+            signal_defs,
+            already_selected=[],
+            parent=self,
+        )
+        
+        if selected is not None:
+            self._log_table.set_signal_filter(selected)
+            logger.info(f"Message log filter updated: {len(selected)} signals")
+    
     @Slot()
     def _on_clear_all(self) -> None:
         """Clear all data from widgets."""
         self._log_table.clear()
         self._plot_widget.clear_plot()
-        self._state_diagram.clear()
+        self._state_diagram.clear_data()  # Keep signal selection, just clear data
         
         if self._fullscreen_window:
             self._fullscreen_window.clear()
@@ -851,4 +960,3 @@ class MainWindow(QMainWindow):
         
         logger.info("Application closing")
         super().closeEvent(event)
-

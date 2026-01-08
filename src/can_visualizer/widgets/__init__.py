@@ -6,6 +6,7 @@ from .plot_widget import PlotWidget
 from .state_diagram import StateDiagramWidget
 from .fullscreen_plot import FullscreenPlotWindow
 from .selected_signals import SelectedSignalsWidget
+from .signal_selector_dialog import SignalSelectorDialog
 
 __all__ = [
     "SignalBrowserWidget",
@@ -14,5 +15,6 @@ __all__ = [
     "StateDiagramWidget",
     "FullscreenPlotWindow",
     "SelectedSignalsWidget",
+    "SignalSelectorDialog",
 ]
 
