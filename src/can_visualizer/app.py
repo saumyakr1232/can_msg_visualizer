@@ -704,9 +704,6 @@ class MainWindow(QMainWindow):
         self._progress_bar.setRange(0, 100)  # Determinate mode
         self._progress_bar.setValue(0)
         self._status_message.setText("Parsing...")
-        
-        # Notify log table that parsing has started (for lazy updates)
-        self._log_table.set_parsing_state(True)
     
     @Slot(ParseProgress)
     def _on_progress_updated(self, progress: ParseProgress) -> None:
@@ -743,9 +740,6 @@ class MainWindow(QMainWindow):
         self._stop_btn.setEnabled(False)
         self._progress_bar.setVisible(False)
         
-        # Notify log table that parsing completed (triggers final lazy flush)
-        self._log_table.set_parsing_state(False)
-        
         self._status_message.setText(
             f"Parsing complete - {self._log_table.signal_count:,} signals"
         )
@@ -759,9 +753,6 @@ class MainWindow(QMainWindow):
         self._stop_btn.setEnabled(False)
         self._progress_bar.setVisible(False)
         self._status_message.setText("Parsing cancelled")
-        
-        # Notify log table that parsing stopped (triggers lazy flush)
-        self._log_table.set_parsing_state(False)
     
     @Slot(str)
     def _on_parsing_error(self, error: str) -> None:
@@ -770,9 +761,6 @@ class MainWindow(QMainWindow):
         self._stop_btn.setEnabled(False)
         self._progress_bar.setVisible(False)
         self._status_message.setText(f"Error: {error}")
-        
-        # Notify log table that parsing stopped (triggers lazy flush)
-        self._log_table.set_parsing_state(False)
         
         QMessageBox.critical(
             self,
