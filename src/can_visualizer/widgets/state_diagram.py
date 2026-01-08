@@ -583,7 +583,7 @@ class TimeAxisWidget(QFrame):
             painter.drawLine(x, height - 6, x, height - 1)
 
             painter.setPen(QColor("#AAAAAA"))
-            label = f"{tick:.3g}"
+            label = f"{tick:g}"
             label_width = fm.horizontalAdvance(label)
             painter.drawText(x - label_width // 2, height - 10, label)
 
@@ -612,6 +612,7 @@ class StateDiagramControlPanel(QWidget):
     run_clicked = Signal()
     stop_clicked = Signal()
     reset_clicked = Signal()
+    fit_clicked = Signal()
     signal_removed = Signal(str)
     speed_changed = Signal(float)
 
@@ -675,9 +676,21 @@ class StateDiagramControlPanel(QWidget):
 
         layout.addLayout(controls_layout)
 
+        # Tools layout
+        tools_layout = QHBoxLayout()
+        tools_layout.setSpacing(4)
+
         self._reset_btn = QPushButton("🔄 Reset")
+        self._reset_btn.setToolTip("Clear data but keep signals")
         self._reset_btn.clicked.connect(self.reset_clicked.emit)
-        layout.addWidget(self._reset_btn)
+        tools_layout.addWidget(self._reset_btn)
+
+        self._fit_btn = QPushButton("↔ Fit")
+        self._fit_btn.setToolTip("Auto-fit view to data")
+        self._fit_btn.clicked.connect(self.fit_clicked.emit)
+        tools_layout.addWidget(self._fit_btn)
+
+        layout.addLayout(tools_layout)
 
         # Playback speed control
         speed_label = QLabel("Playback Speed:")
@@ -872,6 +885,7 @@ class StateDiagramWidget(QWidget):
         self._control_panel.run_clicked.connect(self._on_run)
         self._control_panel.stop_clicked.connect(self._on_stop)
         self._control_panel.reset_clicked.connect(self._on_reset)
+        self._control_panel.fit_clicked.connect(self._fit_view_to_data)
         self._control_panel.signal_removed.connect(self._on_signal_removed)
         self._control_panel.speed_changed.connect(self._on_speed_changed)
         self._splitter.addWidget(self._control_panel)
@@ -951,7 +965,12 @@ class StateDiagramWidget(QWidget):
 
         self._view_time_min = mouse_time - mouse_ratio * new_range
         self._view_time_max = mouse_time + (1 - mouse_ratio) * new_range
-        self._view_window_size = new_range
+
+        # Clamp to 0
+        if self._view_time_min < 0:
+            self._view_time_min = 0.0
+
+        self._view_window_size = self._view_time_max - self._view_time_min
 
         self._sync_time_range()
         self._time_header.set_time_range(self._view_time_min, self._view_time_max)
@@ -960,6 +979,10 @@ class StateDiagramWidget(QWidget):
         """Handle drag panning."""
         if self._is_running:
             return
+
+        # Prevent panning into negative time
+        if self._view_time_min + delta_time < 0:
+            delta_time = -self._view_time_min
 
         self._view_time_min += delta_time
         self._view_time_max += delta_time
