@@ -717,6 +717,8 @@ class MainWindow(QMainWindow):
 
         if progress.state == ParseState.PARSING:
             self._status_message.setText(f"Parsing... {progress.progress_percent:.1f}%")
+        else:
+            self._status_message.setText(str(progress.state.value))
 
     @Slot()
     def _on_signals_decoded(self) -> None:

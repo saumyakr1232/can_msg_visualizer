@@ -90,6 +90,9 @@ class PlotWidget(QWidget):
         # Dict[signal_name, float]
         self._last_loaded_ts: dict[str, float] = {}
 
+        # Time offset for elapsed time display (first timestamp = 0)
+        self._time_offset: Optional[float] = None
+
         self._plot_items: dict[str, pg.PlotDataItem] = {}
         self._selected_signals: list[str] = []
         self._custom_colors: dict[str, str] = {}  # signal_name -> hex color
@@ -175,7 +178,7 @@ class PlotWidget(QWidget):
         self._plot_widget.showGrid(x=True, y=True, alpha=0.3)
 
         # Configure axes
-        self._plot_widget.setLabel("bottom", "Time", units="s")
+        self._plot_widget.setLabel("bottom", "Elapsed Time", units="s")
         self._plot_widget.setLabel("left", "Value")
 
         # Enable mouse interaction
@@ -463,26 +466,14 @@ class PlotWidget(QWidget):
 
     def _load_data_for_signal(self, full_name: str) -> None:
         """Load initial or missing data for a signal from DataStore."""
-        # Get signal name from full name (assuming DataStore handles full name or we need to parse)
-        # DataStore uses whatever format is stored in `signal_name` column.
-        # Based on models.py, signal_name might just be the signal name, not Message.Signal.
-        # However, DataStore `fetch_by_signal` queries `signal_name`.
-        # Check `DataStore.add_data`: `signal.signal_name`.
-        # `full_name` passed here acts as unique ID in plot.
-        # CAUTION: If multiple messages have same signal name, DataStore might mix them if `signal_name` is non-unique.
-        # But `DataStore` matches `signal_name`.
-        # The PlotWidget receives `full_name` (e.g. `Message.Signal`).
-        # We need to extract the actual signal name to query DataStore, OR DataStore should query by both or store full name.
-        # Looking at `DecodedSignal`: `full_name` property exists. `signal_name` is separate.
-        # DataStore `fetch_by_signal` checks `signal_name` column.
-        # IF there are name collisions, this might get data from wrong message.
-        # Ideally DataStore should allow querying by unique key.
-        # For now, I will extract the signal name part, assuming uniqueness or that `DataStore` logic will be updated if needed.
-        # Or better: Check if I can filter by explicit signal name.
 
         signal_name = full_name.split(".")[-1]
 
         timestamps, values = self._data_store.get_signal_data(signal_name)
+
+        # Set time offset on first data load (first timestamp becomes 0)
+        if timestamps and self._time_offset is None:
+            self._time_offset = timestamps[0]
 
         self._signal_data[full_name] = (timestamps, values)
         if timestamps:
@@ -576,6 +567,10 @@ class PlotWidget(QWidget):
             x = np.array(timestamps)
             y = np.array(values)
 
+            # Convert to elapsed time (subtract first timestamp offset)
+            if self._time_offset is not None:
+                x = x - self._time_offset
+
             # Downsample if needed (already handled by pyqtgraph auto downsample, but we can pre-clip)
             # Actually pg downsampling usually handles this well.
             # If we manually downsample, we save memory/transfer to GPU.
@@ -611,27 +606,14 @@ class PlotWidget(QWidget):
         self._plot_items.clear()
         self._signal_data.clear()
         self._last_loaded_ts.clear()
+        self._time_offset = None  # Reset time offset
         self._point_label.setText("0 points")
-
-        # Reset selection state if desired? No, usually clear data but keep selection.
-        # But method description says "Clear all plot data and items".
-        # Let's keep logic consistent: re-loading would require re-selecting or re-fetching.
-        # If I clear data, `_last_loaded_ts` goes to empty. Next update loop should NOT auto-fetch old data unless specific trigger.
-        # Actually `DataStore` might still have data. The user might want to clear Visuals but keep selection.
-        # But if DataStore has data, next `_check_for_updates` might re-fetch EVERYTHING because `last_loaded_ts` is gone.
-        # So we should set `last_loaded_ts` to 0.0 or something to allow re-fetch if desired?
-        # Or effectively "Clear Plot" might mean "reset view" but data persists in backend.
-        # If the user wants to clear displayed data, they probably want to see it gone.
-        # If I leave `_selected_signals` populated, the loop will re-populate it.
-        # So I should probably just clear the local cache and rely on user action to reload or flush data store.
-        # If `DataStore` is permanent, `Clear Plot` is temporary unless signals are deselected.
-        # For now, I'll clear local cache.
-        pass
 
     def clear_data_only(self) -> None:
         """Clear data but keep signal selection."""
         self._signal_data.clear()
         self._last_loaded_ts.clear()
+        self._time_offset = None  # Reset time offset
         self._update_plot()
 
     def _on_grid_toggled(self, checked: bool) -> None:
