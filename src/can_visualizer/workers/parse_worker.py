@@ -144,10 +144,19 @@ class ParseWorker(QThread):
 
         def message_iterator():
             """Generate message tuples for decode pool."""
+            nonlocal last_progress_time
             for msg in parser.iterate_messages():
                 if self._is_cancelled():
                     return
                 self._progress.processed_messages += 1
+
+                # Emit progress update during message iteration for smooth UI
+                current_time = time.time()
+                if current_time - last_progress_time >= self.PROGRESS_UPDATE_INTERVAL:
+                    self._progress.elapsed_seconds = current_time - start_time
+                    self.progress_updated.emit(self._progress)
+                    last_progress_time = current_time
+
                 # Convert CANMessage to tuple for decode pool
                 yield (
                     msg.timestamp,
@@ -196,13 +205,6 @@ class ParseWorker(QThread):
                     signal_batch.clear()
                     # Small sleep to let UI process
                     self.msleep(1)
-
-                # Emit progress update frequently
-                current_time = time.time()
-                if current_time - last_progress_time >= self.PROGRESS_UPDATE_INTERVAL:
-                    self._progress.elapsed_seconds = current_time - start_time
-                    self.progress_updated.emit(self._progress)
-                    last_progress_time = current_time
 
             # Emit remaining signals
             if signal_batch:
