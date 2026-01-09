@@ -53,8 +53,8 @@ class ParseWorker(QThread):
     counting_started = Signal()  # Emitted when counting messages
 
     # Batch sizes for responsive UI
-    SIGNAL_BATCH_SIZE = 1000  # For emitting to data store
-    PROGRESS_UPDATE_INTERVAL = 0.2  # 200ms for smooth progress bar
+    SIGNAL_BATCH_SIZE = 5000  # Larger batches to reduce signal frequency on Windows
+    PROGRESS_UPDATE_INTERVAL = 0.5  # 500ms to reduce event queue flooding
 
     def __init__(
         self,
@@ -141,21 +141,30 @@ class ParseWorker(QThread):
         self.progress_updated.emit(self._progress)
 
         last_progress_time = time.time()
+        messages_since_progress = 0
 
         def message_iterator():
             """Generate message tuples for decode pool."""
-            nonlocal last_progress_time
+            nonlocal last_progress_time, messages_since_progress
             for msg in parser.iterate_messages():
                 if self._is_cancelled():
                     return
                 self._progress.processed_messages += 1
+                messages_since_progress += 1
 
-                # Emit progress update during message iteration for smooth UI
+                # Emit progress update during message iteration
+                # Use time-based throttling AND message count to reduce frequency
                 current_time = time.time()
-                if current_time - last_progress_time >= self.PROGRESS_UPDATE_INTERVAL:
+                if (
+                    current_time - last_progress_time >= self.PROGRESS_UPDATE_INTERVAL
+                    and messages_since_progress >= 1000
+                ):
                     self._progress.elapsed_seconds = current_time - start_time
                     self.progress_updated.emit(self._progress)
                     last_progress_time = current_time
+                    messages_since_progress = 0
+                    # Small sleep to let UI thread process the signal
+                    self.msleep(5)
 
                 # Convert CANMessage to tuple for decode pool
                 yield (
@@ -203,8 +212,8 @@ class ParseWorker(QThread):
                     self._data_store.add_data(list(signal_batch))
                     self.signals_decoded.emit()
                     signal_batch.clear()
-                    # Small sleep to let UI process
-                    self.msleep(1)
+                    # Sleep to let UI thread process signals_decoded
+                    self.msleep(10)
 
             # Emit remaining signals
             if signal_batch:
