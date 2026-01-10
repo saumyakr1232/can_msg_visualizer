@@ -6,6 +6,14 @@ A professional-grade CAN bus analysis tool for parsing, decoding, streaming, and
 ![PySide6](https://img.shields.io/badge/GUI-PySide6-green.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 
+## Screenshots
+
+### Dark Theme
+![Dark Theme](images/Screenshot%202026-01-10%20at%202.06.26%20PM.png)
+
+### Light Theme (In Development)
+![Light Theme](images/Screenshot%202026-01-10%20at%202.33.37%20PM.png)
+
 ## Features
 
 ### Core Functionality
@@ -29,7 +37,9 @@ A professional-grade CAN bus analysis tool for parsing, decoding, streaming, and
   - Search filtering
   - Multi-selection via checkboxes
   - Signal metadata tooltips
-- **Dark Theme**: Modern, professional dark UI
+- **Theme Support**: System, Dark, and Light themes
+  - Switch via **View → Theme** menu
+  - Theme preference is persisted across sessions
 - **Responsive**: UI remains responsive during parsing via background threading
 
 ## Installation
@@ -62,13 +72,13 @@ uv run python -m can_visualizer.main
 
 ### Quick Start
 
-1. **Load DBC File**: Click "Load DBC" or press `Ctrl+D` to select your DBC database file
-2. **Load Trace File**: Click "Load Trace" or press `Ctrl+O` to select a BLF or ASC trace file
-3. **Browse Signals**: Use the left panel to explore and select signals
-4. **View Data**: 
-   - Message Log tab shows all decoded messages
-   - Signal Plot tab shows selected signals over time
-   - State Diagram tab visualizes discrete signal states
+1.  **Load DBC File**: Click "Load DBC" or press `Ctrl+D` to select your DBC database file
+2.  **Load Trace File**: Click "Load Trace" or press `Ctrl+O` to select a BLF or ASC trace file
+3.  **Browse Signals**: Use the left panel to explore and select signals
+4.  **View Data**:
+    - Message Log tab shows all decoded messages
+    - Signal Plot tab shows selected signals over time
+    - State Diagram tab visualizes discrete signal states
 
 ### Keyboard Shortcuts
 
@@ -99,7 +109,8 @@ src/can_visualizer/
 │   ├── models.py        # Data models (CANMessage, DecodedSignal, etc.)
 │   ├── parser.py        # BLF/ASC file parser using python-can
 │   ├── decoder.py       # DBC-based signal decoder using cantools
-│   └── cache.py         # SQLite caching for decoded data
+│   ├── cache.py         # SQLite caching for decoded data
+│   └── theme_manager.py # Theme management (System/Dark/Light)
 ├── workers/
 │   └── parse_worker.py  # QThread for async parsing
 ├── widgets/
@@ -114,19 +125,29 @@ src/can_visualizer/
 
 ### Design Principles
 
-- **Separation of Concerns**: Each module has a single responsibility
-- **Thread Safety**: Background parsing with Qt signal-slot communication
-- **Memory Efficiency**: Streaming parsing, virtual scrolling, data capping
-- **Performance**: Downsampling, clip-to-view, batch updates
+-   **Separation of Concerns**: Each module has a single responsibility
+-   **Thread Safety**: Background parsing with Qt signal-slot communication
+-   **Memory Efficiency**: Streaming parsing, virtual scrolling, data capping
+-   **Performance**: Downsampling, clip-to-view, batch updates
 
 ## Performance
 
 The application is designed to handle large CAN trace files:
 
-- **Parsing**: Streaming parser processes files without loading entirely into memory
-- **Table View**: Virtual scrolling handles 500,000+ rows efficiently
-- **Plotting**: Automatic downsampling when data exceeds 100,000 points per signal
-- **Caching**: Previously parsed files load instantly from SQLite cache
+-   **Parsing**: Streaming parser processes files without loading entirely into memory
+-   **Table View**: Virtual scrolling handles 500,000+ rows efficiently
+-   **Plotting**: Automatic downsampling when data exceeds 100,000 points per signal
+-   **Caching**: Previously parsed files load instantly from SQLite cache
+
+## Development
+
+### In Progress
+- **Light Theme**: Basic light theme is functional but some widgets may have visual inconsistencies
+
+### Planned
+- Export functionality (CSV, Excel)
+- Signal comparison tools
+- Custom color palettes for plots
 
 ## Logging
 
@@ -144,14 +165,24 @@ Decoded signal data is cached in `~/.can_visualizer/cache/`:
 
 ## Dependencies
 
-- **PySide6**: Qt6 bindings for Python GUI
-- **python-can**: CAN bus interface library for BLF/ASC parsing
-- **cantools**: DBC file parsing and signal decoding
-- **pyqtgraph**: High-performance plotting library
+-   **PySide6**: Qt6 bindings for Python GUI
+-   **python-can**: CAN bus interface library for BLF/ASC parsing
+-   **cantools**: DBC file parsing and signal decoding
+-   **pyqtgraph**: High-performance plotting library
 
 ## License
 
-MIT License - see LICENSE file for details.
+This project is licensed under the **MIT License** - see the [LICENSE](LICENSE) file for details.
+
+### Third-Party Licenses
+
+This application uses **PySide6**, which is licensed under the [LGPL v3](https://www.gnu.org/licenses/lgpl-3.0.html). The MIT License is fully compatible with LGPL v3, allowing you to:
+
+-   Use this software in commercial and proprietary projects
+-   Modify and distribute this software freely
+-   Combine this software with LGPL-licensed components like PySide6
+
+**Note**: If you redistribute PySide6 itself, you must comply with the LGPL v3 requirements for that component.
 
 ## Contributing
 
@@ -159,4 +190,3 @@ Contributions are welcome! Please ensure:
 - Code follows existing style conventions
 - New features include appropriate logging
 - Large datasets are handled efficiently
-
