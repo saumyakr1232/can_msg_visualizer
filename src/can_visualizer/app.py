@@ -31,9 +31,9 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QFrame,
 )
-from PySide6.QtGui import QAction, QKeySequence
+from PySide6.QtGui import QAction, QActionGroup, QKeySequence
 
-from .core import DataStore
+from .core import DataStore, ThemeMode, get_theme_manager
 from .core.decoder import DBCDecoder
 from .core.models import ParseProgress, ParseState, DecodedSignal, SignalDefinition
 from .workers.parse_worker import ParseWorker
@@ -150,11 +150,23 @@ class MainWindow(QMainWindow):
         self._parse_worker: Optional[ParseWorker] = None
         self._fullscreen_window: Optional[FullscreenPlotWindow] = None
 
+        # Get theme manager
+        self._theme_manager = get_theme_manager()
+
         self._setup_ui()
         self._setup_menu()
         self._setup_toolbar()
         self._setup_statusbar()
         self._connect_signals()
+
+        # Connect theme manager
+        self._theme_manager.theme_changed.connect(self._on_theme_changed)
+
+        # Apply initial color scheme for title bar
+        self._theme_manager.apply_color_scheme()
+
+        # Apply initial theme to all widgets
+        self._apply_theme_to_widgets()
 
         logger.info("Main window initialized")
 
@@ -163,8 +175,8 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("CAN Message Visualizer")
         self.setMinimumSize(1200, 800)
 
-        # Apply dark theme
-        self.setStyleSheet(self._get_stylesheet())
+        # Apply theme from ThemeManager
+        self.setStyleSheet(self._theme_manager.get_stylesheet())
 
         # Central widget
         central = QWidget()
@@ -236,6 +248,49 @@ class MainWindow(QMainWindow):
         self._fullscreen_action.setShortcut(QKeySequence("F11"))
         self._fullscreen_action.triggered.connect(self._on_open_fullscreen)
         view_menu.addAction(self._fullscreen_action)
+
+        view_menu.addSeparator()
+
+        # Theme submenu
+        theme_menu = QMenu("&Theme", self)
+        view_menu.addMenu(theme_menu)
+
+        # Theme action group for radio behavior
+        self._theme_action_group = QActionGroup(self)
+        self._theme_action_group.setExclusive(True)
+
+        self._theme_system_action = QAction("&System", self)
+        self._theme_system_action.setCheckable(True)
+        self._theme_system_action.triggered.connect(
+            lambda: self._theme_manager.set_theme(ThemeMode.SYSTEM)
+        )
+        self._theme_action_group.addAction(self._theme_system_action)
+        theme_menu.addAction(self._theme_system_action)
+
+        self._theme_dark_action = QAction("&Dark", self)
+        self._theme_dark_action.setCheckable(True)
+        self._theme_dark_action.triggered.connect(
+            lambda: self._theme_manager.set_theme(ThemeMode.DARK)
+        )
+        self._theme_action_group.addAction(self._theme_dark_action)
+        theme_menu.addAction(self._theme_dark_action)
+
+        self._theme_light_action = QAction("&Light", self)
+        self._theme_light_action.setCheckable(True)
+        self._theme_light_action.triggered.connect(
+            lambda: self._theme_manager.set_theme(ThemeMode.LIGHT)
+        )
+        self._theme_action_group.addAction(self._theme_light_action)
+        theme_menu.addAction(self._theme_light_action)
+
+        # Set initial checked state based on current theme
+        current_mode = self._theme_manager.current_mode
+        if current_mode == ThemeMode.SYSTEM:
+            self._theme_system_action.setChecked(True)
+        elif current_mode == ThemeMode.DARK:
+            self._theme_dark_action.setChecked(True)
+        else:
+            self._theme_light_action.setChecked(True)
 
         view_menu.addSeparator()
 
@@ -332,229 +387,6 @@ class MainWindow(QMainWindow):
 
         # Message log filter -> Signal selector dialog
         self._log_table.add_filter_requested.connect(self._on_message_log_add_filter)
-
-    def _get_stylesheet(self) -> str:
-        """Return application stylesheet."""
-        return """
-            QMainWindow {
-                background: #1E1E1E;
-            }
-            QWidget {
-                background: #1E1E1E;
-                color: #D4D4D4;
-                font-family: 'Segoe UI', 'SF Pro Display', -apple-system, sans-serif;
-                font-size: 13px;
-            }
-            QGroupBox {
-                border: 1px solid #3D3D3D;
-                border-radius: 4px;
-                margin-top: 8px;
-                padding-top: 8px;
-                font-weight: bold;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 8px;
-                padding: 0 4px;
-            }
-            QTabWidget::pane {
-                border: 1px solid #3D3D3D;
-                border-radius: 4px;
-            }
-            QTabBar::tab {
-                background: #2D2D2D;
-                border: 1px solid #3D3D3D;
-                border-bottom: none;
-                padding: 8px 16px;
-                margin-right: 2px;
-            }
-            QTabBar::tab:selected {
-                background: #1E1E1E;
-                border-bottom: 2px solid #0078D4;
-            }
-            QTabBar::tab:hover {
-                background: #3D3D3D;
-            }
-            QPushButton {
-                background: #0078D4;
-                border: none;
-                border-radius: 4px;
-                padding: 6px 16px;
-                color: white;
-                font-weight: 500;
-            }
-            QPushButton:hover {
-                background: #1084D9;
-            }
-            QPushButton:pressed {
-                background: #006CC1;
-            }
-            QPushButton:disabled {
-                background: #3D3D3D;
-                color: #666;
-            }
-            QLineEdit {
-                background: #2D2D2D;
-                border: 1px solid #3D3D3D;
-                border-radius: 4px;
-                padding: 6px 8px;
-                selection-background-color: #0078D4;
-            }
-            QLineEdit:focus {
-                border-color: #0078D4;
-            }
-            QTreeWidget {
-                background: #252526;
-                border: 1px solid #3D3D3D;
-                border-radius: 4px;
-            }
-            QTreeWidget::item {
-                padding: 4px;
-            }
-            QTreeWidget::item:hover {
-                background: #2D2D2D;
-            }
-            QTreeWidget::item:selected {
-                background: #0078D4;
-            }
-            QTableView {
-                background: #252526;
-                border: 1px solid #3D3D3D;
-                gridline-color: #3D3D3D;
-            }
-            QTableView::item:selected {
-                background: #0078D4;
-            }
-            QHeaderView::section {
-                background: #2D2D2D;
-                border: none;
-                border-right: 1px solid #3D3D3D;
-                border-bottom: 1px solid #3D3D3D;
-                padding: 6px;
-                font-weight: bold;
-            }
-            QProgressBar {
-                background: #2D2D2D;
-                border: none;
-                border-radius: 4px;
-                text-align: center;
-            }
-            QProgressBar::chunk {
-                background: #0078D4;
-                border-radius: 4px;
-            }
-            QStatusBar {
-                background: #252526;
-                border-top: 1px solid #3D3D3D;
-            }
-            QMenuBar {
-                background: #252526;
-                border-bottom: 1px solid #3D3D3D;
-            }
-            QMenuBar::item {
-                padding: 6px 12px;
-            }
-            QMenuBar::item:selected {
-                background: #3D3D3D;
-            }
-            QMenu {
-                background: #2D2D2D;
-                border: 1px solid #3D3D3D;
-            }
-            QMenu::item {
-                padding: 6px 24px;
-            }
-            QMenu::item:selected {
-                background: #0078D4;
-            }
-            QToolBar {
-                background: #252526;
-                border-bottom: 1px solid #3D3D3D;
-                spacing: 4px;
-                padding: 4px;
-            }
-            QSplitter::handle {
-                background: #3D3D3D;
-            }
-            QComboBox {
-                background: #2D2D2D;
-                border: 1px solid #3D3D3D;
-                border-radius: 4px;
-                padding: 6px 8px;
-            }
-            QComboBox:hover {
-                border-color: #0078D4;
-            }
-            QComboBox::drop-down {
-                border: none;
-                width: 20px;
-            }
-            QComboBox QAbstractItemView {
-                background: #2D2D2D;
-                border: 1px solid #3D3D3D;
-                selection-background-color: #0078D4;
-            }
-            QCheckBox {
-                spacing: 8px;
-            }
-            QCheckBox::indicator {
-                width: 16px;
-                height: 16px;
-                border-radius: 3px;
-                border: 1px solid #3D3D3D;
-                background: #2D2D2D;
-            }
-            QCheckBox::indicator:checked {
-                background: #0078D4;
-                border-color: #0078D4;
-            }
-            QScrollBar:vertical {
-                background: #1E1E1E;
-                width: 12px;
-                margin: 0;
-            }
-            QScrollBar::handle:vertical {
-                background: #3D3D3D;
-                border-radius: 6px;
-                min-height: 20px;
-            }
-            QScrollBar::handle:vertical:hover {
-                background: #4D4D4D;
-            }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
-                height: 0;
-            }
-            QScrollBar:horizontal {
-                background: #1E1E1E;
-                height: 12px;
-                margin: 0;
-            }
-            QScrollBar::handle:horizontal {
-                background: #3D3D3D;
-                border-radius: 6px;
-                min-width: 20px;
-            }
-            QScrollBar::handle:horizontal:hover {
-                background: #4D4D4D;
-            }
-            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
-                width: 0;
-            }
-            QListWidget {
-                background: #252526;
-                border: 1px solid #3D3D3D;
-                border-radius: 4px;
-            }
-            QListWidget::item {
-                padding: 6px;
-            }
-            QListWidget::item:hover {
-                background: #2D2D2D;
-            }
-            QListWidget::item:selected {
-                background: #0078D4;
-            }
-        """
 
     # ================== File Loading ==================
 
@@ -926,6 +758,38 @@ class MainWindow(QMainWindow):
 
         self._msg_count_label.setText("Messages: 0")
         self._status_message.setText("Data cleared")
+
+    # ================== Theme ==================
+
+    @Slot()
+    def _on_theme_changed(self, mode: ThemeMode) -> None:
+        """Handle theme change from ThemeManager."""
+        # Apply new stylesheet to main window
+        self.setStyleSheet(self._theme_manager.get_stylesheet())
+
+        # Apply theme to all widgets
+        self._apply_theme_to_widgets()
+
+        logger.info(f"Theme changed to: {mode.value}")
+
+    def _apply_theme_to_widgets(self) -> None:
+        """Apply current theme to all widgets."""
+        is_dark = self._theme_manager.is_dark_mode()
+        bg_color = self._theme_manager.get_plot_background()
+        fg_color = self._theme_manager.get_plot_foreground()
+
+        # Update plot widgets
+        self._plot_widget.update_theme(bg_color, fg_color)
+        self._state_diagram.update_theme(bg_color, fg_color)
+
+        # Update table widgets
+        self._log_table.update_theme(is_dark)
+        self._selected_signals_widget.update_theme(is_dark)
+        self._signal_browser.update_theme(is_dark)
+
+        # Update fullscreen window if open
+        if self._fullscreen_window and self._fullscreen_window.isVisible():
+            self._fullscreen_window.update_theme(bg_color, fg_color)
 
     # ================== Cleanup ==================
 

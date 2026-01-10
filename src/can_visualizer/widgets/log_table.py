@@ -537,6 +537,35 @@ class LogTableWidget(QWidget):
         self._table.verticalHeader().setVisible(False)
         self._table.setShowGrid(False)
 
+        # Dark theme styling to fix white lines
+        self._table.setStyleSheet("""
+            QTableView {
+                background-color: #1E1E1E;
+                alternate-background-color: #252526;
+                color: #E0E0E0;
+                gridline-color: transparent;
+                border: none;
+            }
+            QTableView::item {
+                padding: 4px 8px;
+                border: none;
+            }
+            QTableView::item:selected {
+                background-color: #094771;
+                color: #FFFFFF;
+            }
+            QTableView::item:hover {
+                background-color: #2D2D2D;
+            }
+            QHeaderView::section {
+                background-color: #2D2D2D;
+                color: #E0E0E0;
+                padding: 6px 8px;
+                border: none;
+                border-bottom: 1px solid #3D3D3D;
+            }
+        """)
+
         # Column sizing
         header = self._table.horizontalHeader()
         header.setSectionResizeMode(
@@ -730,3 +759,79 @@ class LogTableWidget(QWidget):
     def loaded_count(self) -> int:
         """Get count of signals loaded into display."""
         return self._model.loaded_count
+
+    def update_theme(self, is_dark: bool) -> None:
+        """
+        Update colors for theme change.
+
+        Args:
+            is_dark: True if dark theme, False if light theme
+        """
+        if is_dark:
+            self._table.setStyleSheet("""
+                QTableView {
+                    background-color: #1E1E1E;
+                    alternate-background-color: #252526;
+                    color: #E0E0E0;
+                    gridline-color: transparent;
+                    border: none;
+                }
+                QTableView::item {
+                    padding: 4px 8px;
+                    border: none;
+                }
+                QTableView::item:selected {
+                    background-color: #094771;
+                    color: #FFFFFF;
+                }
+                QTableView::item:hover {
+                    background-color: #2D2D2D;
+                }
+                QHeaderView::section {
+                    background-color: #2D2D2D;
+                    color: #E0E0E0;
+                    padding: 6px 8px;
+                    border: none;
+                    border-bottom: 1px solid #3D3D3D;
+                }
+            """)
+            self._filter_panel.setStyleSheet("""
+                MessageLogFilterPanel {
+                    background: #252526;
+                    border-right: 1px solid #3D3D3D;
+                }
+            """)
+        else:
+            self._table.setStyleSheet("""
+                QTableView {
+                    background-color: #FFFFFF;
+                    alternate-background-color: #F8F8F8;
+                    color: #1E1E1E;
+                    gridline-color: transparent;
+                    border: none;
+                }
+                QTableView::item {
+                    padding: 4px 8px;
+                    border: none;
+                }
+                QTableView::item:selected {
+                    background-color: #0078D4;
+                    color: #FFFFFF;
+                }
+                QTableView::item:hover {
+                    background-color: #E8E8E8;
+                }
+                QHeaderView::section {
+                    background-color: #E8E8E8;
+                    color: #1E1E1E;
+                    padding: 6px 8px;
+                    border: none;
+                    border-bottom: 1px solid #D0D0D0;
+                }
+            """)
+            self._filter_panel.setStyleSheet("""
+                MessageLogFilterPanel {
+                    background: #F0F0F0;
+                    border-right: 1px solid #D0D0D0;
+                }
+            """)

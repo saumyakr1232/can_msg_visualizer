@@ -490,3 +490,93 @@ class FullscreenPlotWindow(QMainWindow):
         self._crosshair_enabled = checked
         if not checked:
             self._hide_crosshair()
+
+    def update_theme(self, bg_color: str, fg_color: str) -> None:
+        """
+        Update colors for theme change.
+
+        Args:
+            bg_color: Background color hex string
+            fg_color: Foreground color hex string
+        """
+        is_dark = bg_color.startswith("#1") or bg_color.startswith("#2")
+
+        # Update window stylesheet
+        if is_dark:
+            self.setStyleSheet("""
+                QMainWindow {
+                    background: #1E1E1E;
+                }
+                QWidget {
+                    background: #1E1E1E;
+                    color: #E0E0E0;
+                }
+                QPushButton {
+                    background: #3D3D3D;
+                    border: 1px solid #555;
+                    border-radius: 4px;
+                    padding: 6px 12px;
+                    color: #E0E0E0;
+                }
+                QPushButton:hover {
+                    background: #4D4D4D;
+                }
+                QPushButton:pressed {
+                    background: #2D2D2D;
+                }
+                QCheckBox {
+                    color: #E0E0E0;
+                }
+                QLabel {
+                    color: #888;
+                }
+            """)
+        else:
+            self.setStyleSheet("""
+                QMainWindow {
+                    background: #F5F5F5;
+                }
+                QWidget {
+                    background: #F5F5F5;
+                    color: #1E1E1E;
+                }
+                QPushButton {
+                    background: #E8E8E8;
+                    border: 1px solid #D0D0D0;
+                    border-radius: 4px;
+                    padding: 6px 12px;
+                    color: #1E1E1E;
+                }
+                QPushButton:hover {
+                    background: #D8D8D8;
+                }
+                QPushButton:pressed {
+                    background: #C8C8C8;
+                }
+                QCheckBox {
+                    color: #1E1E1E;
+                }
+                QLabel {
+                    color: #666;
+                }
+            """)
+
+        self._plot_widget.setBackground(bg_color)
+
+        # Update axis colors
+        axis_pen = pg.mkPen(color=fg_color)
+        self._plot_widget.getPlotItem().getAxis("bottom").setPen(axis_pen)
+        self._plot_widget.getPlotItem().getAxis("bottom").setTextPen(axis_pen)
+        self._plot_widget.getPlotItem().getAxis("left").setPen(axis_pen)
+        self._plot_widget.getPlotItem().getAxis("left").setTextPen(axis_pen)
+
+        # Update crosshair colors
+        crosshair_color = "#888888" if is_dark else "#666666"
+        if self._vline:
+            self._vline.setPen(
+                pg.mkPen(crosshair_color, width=1, style=Qt.PenStyle.DashLine)
+            )
+        if self._hline:
+            self._hline.setPen(
+                pg.mkPen(crosshair_color, width=1, style=Qt.PenStyle.DashLine)
+            )

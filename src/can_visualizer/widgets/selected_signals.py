@@ -5,8 +5,7 @@ Displays currently selected signals with options to remove them
 and provides a clear overview of what's being plotted/analyzed.
 """
 
-from typing import Optional
-from PySide6.QtCore import Qt, Signal, Slot
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -107,7 +106,8 @@ class SelectedSignalsWidget(QWidget):
         self._list_widget.itemDoubleClicked.connect(self._on_item_double_clicked)
         self._list_widget.setStyleSheet("""
             QListWidget {
-                background: #252526;
+                background: #1E1E1E;
+                alternate-background-color: #252526;
                 border: 1px solid #3D3D3D;
                 border-radius: 4px;
             }
@@ -282,13 +282,13 @@ class SelectedSignalsWidget(QWidget):
             sig_name = full_name.split(".")[-1] if full_name else "Signal"
 
             # Set Color action
-            set_color_action = QAction(f"🎨 Set Color...", self)
+            set_color_action = QAction("🎨 Set Color...", self)
             set_color_action.triggered.connect(lambda: self._on_set_color(full_name))
             menu.addAction(set_color_action)
 
             # Reset Color action (only if custom color is set)
             if full_name in self._custom_colors:
-                reset_color_action = QAction(f"↩️ Reset Color", self)
+                reset_color_action = QAction("↩️ Reset Color", self)
                 reset_color_action.triggered.connect(
                     lambda: self._on_reset_color(full_name)
                 )
@@ -388,3 +388,50 @@ class SelectedSignalsWidget(QWidget):
     def get_custom_colors(self) -> dict[str, str]:
         """Get all custom color assignments."""
         return self._custom_colors.copy()
+
+    def update_theme(self, is_dark: bool) -> None:
+        """
+        Update colors for theme change.
+
+        Args:
+            is_dark: True if dark theme, False if light theme
+        """
+        if is_dark:
+            self._list_widget.setStyleSheet("""
+                QListWidget {
+                    background: #1E1E1E;
+                    alternate-background-color: #252526;
+                    border: 1px solid #3D3D3D;
+                    border-radius: 4px;
+                }
+                QListWidget::item {
+                    padding: 6px 8px;
+                    border-bottom: 1px solid #3D3D3D;
+                }
+                QListWidget::item:selected {
+                    background: #0078D4;
+                }
+                QListWidget::item:hover {
+                    background: #2D2D2D;
+                }
+            """)
+        else:
+            self._list_widget.setStyleSheet("""
+                QListWidget {
+                    background: #FFFFFF;
+                    alternate-background-color: #F8F8F8;
+                    border: 1px solid #D0D0D0;
+                    border-radius: 4px;
+                }
+                QListWidget::item {
+                    padding: 6px 8px;
+                    border-bottom: 1px solid #E8E8E8;
+                }
+                QListWidget::item:selected {
+                    background: #0078D4;
+                    color: white;
+                }
+                QListWidget::item:hover {
+                    background: #E8E8E8;
+                }
+            """)

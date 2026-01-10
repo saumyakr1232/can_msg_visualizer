@@ -5,6 +5,7 @@ from .parser import CANParser
 from .decoder import DBCDecoder
 from .cache import CacheManager
 from .data_store import DataStore
+from .theme_manager import ThemeManager, ThemeMode, get_theme_manager
 
 __all__ = [
     "CANMessage",
@@ -14,4 +15,7 @@ __all__ = [
     "DBCDecoder",
     "CacheManager",
     "DataStore",
+    "ThemeManager",
+    "ThemeMode",
+    "get_theme_manager",
 ]

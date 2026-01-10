@@ -316,3 +316,48 @@ class SignalBrowserWidget(QWidget):
     def message_count(self) -> int:
         """Total number of messages in DBC."""
         return len(self._message_items)
+
+    def update_theme(self, is_dark: bool) -> None:
+        """
+        Update colors for theme change.
+
+        Args:
+            is_dark: True if dark theme, False if light theme
+        """
+        if is_dark:
+            self._tree.setStyleSheet("""
+                QTreeWidget {
+                    background: #252526;
+                    alternate-background-color: #2D2D2D;
+                    border: 1px solid #3D3D3D;
+                    border-radius: 4px;
+                }
+                QTreeWidget::item {
+                    padding: 4px;
+                }
+                QTreeWidget::item:hover {
+                    background: #2D2D2D;
+                }
+                QTreeWidget::item:selected {
+                    background: #0078D4;
+                }
+            """)
+        else:
+            self._tree.setStyleSheet("""
+                QTreeWidget {
+                    background: #FFFFFF;
+                    alternate-background-color: #F8F8F8;
+                    border: 1px solid #D0D0D0;
+                    border-radius: 4px;
+                }
+                QTreeWidget::item {
+                    padding: 4px;
+                }
+                QTreeWidget::item:hover {
+                    background: #E8E8E8;
+                }
+                QTreeWidget::item:selected {
+                    background: #0078D4;
+                    color: white;
+                }
+            """)

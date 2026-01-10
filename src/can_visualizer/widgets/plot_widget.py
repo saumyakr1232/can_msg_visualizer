@@ -667,3 +667,40 @@ class PlotWidget(QWidget):
     def get_custom_colors(self) -> dict[str, str]:
         """Get all custom color assignments."""
         return self._custom_colors.copy()
+
+    def update_theme(self, bg_color: str, fg_color: str) -> None:
+        """
+        Update colors for theme change.
+
+        Args:
+            bg_color: Background color hex string
+            fg_color: Foreground color hex string
+        """
+        self._plot_widget.setBackground(bg_color)
+
+        # Update axis colors
+        axis_pen = pg.mkPen(color=fg_color)
+        self._plot_widget.getPlotItem().getAxis("bottom").setPen(axis_pen)
+        self._plot_widget.getPlotItem().getAxis("bottom").setTextPen(axis_pen)
+        self._plot_widget.getPlotItem().getAxis("left").setPen(axis_pen)
+        self._plot_widget.getPlotItem().getAxis("left").setTextPen(axis_pen)
+
+        # Update crosshair colors
+        if self._vline:
+            crosshair_color = (
+                "#888888"
+                if bg_color.startswith("#1") or bg_color.startswith("#2")
+                else "#666666"
+            )
+            self._vline.setPen(
+                pg.mkPen(crosshair_color, width=1, style=Qt.PenStyle.DashLine)
+            )
+        if self._hline:
+            crosshair_color = (
+                "#888888"
+                if bg_color.startswith("#1") or bg_color.startswith("#2")
+                else "#666666"
+            )
+            self._hline.setPen(
+                pg.mkPen(crosshair_color, width=1, style=Qt.PenStyle.DashLine)
+            )

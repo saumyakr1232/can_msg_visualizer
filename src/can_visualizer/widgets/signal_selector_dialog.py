@@ -334,9 +334,132 @@ class SignalSelectorDialog(QDialog):
         Returns:
             List of selected signal full names, or None if cancelled
         """
+        from ..core import get_theme_manager
+
         dialog = SignalSelectorDialog(signal_definitions, already_selected, parent)
+
+        # Apply current theme
+        theme_mgr = get_theme_manager()
+        dialog.update_theme(theme_mgr.is_dark_mode())
 
         if dialog.exec() == QDialog.DialogCode.Accepted:
             return dialog.get_selected_signals()
 
         return None
+
+    def update_theme(self, is_dark: bool) -> None:
+        """
+        Update colors for theme change.
+
+        Args:
+            is_dark: True if dark theme, False if light theme
+        """
+        if is_dark:
+            self.setStyleSheet("""
+                QDialog {
+                    background: #1E1E1E;
+                    color: #E0E0E0;
+                }
+                QLineEdit {
+                    background: #2D2D2D;
+                    border: 1px solid #3D3D3D;
+                    border-radius: 4px;
+                    padding: 8px;
+                    color: #E0E0E0;
+                }
+                QLineEdit:focus {
+                    border-color: #0078D4;
+                }
+                QListWidget {
+                    background: #252526;
+                    border: 1px solid #3D3D3D;
+                    border-radius: 4px;
+                    color: #E0E0E0;
+                }
+                QListWidget::item {
+                    padding: 8px;
+                    border-bottom: 1px solid #3D3D3D;
+                }
+                QListWidget::item:hover {
+                    background: #2D2D2D;
+                }
+                QListWidget::item:selected {
+                    background: #0078D4;
+                }
+                QPushButton {
+                    background: #0078D4;
+                    border: none;
+                    border-radius: 4px;
+                    padding: 8px 16px;
+                    color: white;
+                    font-weight: 500;
+                }
+                QPushButton:hover {
+                    background: #1084D9;
+                }
+                QPushButton:pressed {
+                    background: #006CC1;
+                }
+                QPushButton:disabled {
+                    background: #3D3D3D;
+                    color: #666;
+                }
+                QLabel {
+                    color: #E0E0E0;
+                }
+            """)
+        else:
+            self.setStyleSheet("""
+                QDialog {
+                    background: #F5F5F5;
+                    color: #1E1E1E;
+                }
+                QLineEdit {
+                    background: #FFFFFF;
+                    border: 1px solid #D0D0D0;
+                    border-radius: 4px;
+                    padding: 8px;
+                    color: #1E1E1E;
+                }
+                QLineEdit:focus {
+                    border-color: #0078D4;
+                }
+                QListWidget {
+                    background: #FFFFFF;
+                    border: 1px solid #D0D0D0;
+                    border-radius: 4px;
+                    color: #1E1E1E;
+                }
+                QListWidget::item {
+                    padding: 8px;
+                    border-bottom: 1px solid #E8E8E8;
+                }
+                QListWidget::item:hover {
+                    background: #E8E8E8;
+                }
+                QListWidget::item:selected {
+                    background: #0078D4;
+                    color: white;
+                }
+                QPushButton {
+                    background: #0078D4;
+                    border: none;
+                    border-radius: 4px;
+                    padding: 8px 16px;
+                    color: white;
+                    font-weight: 500;
+                }
+                QPushButton:hover {
+                    background: #1084D9;
+                }
+                QPushButton:pressed {
+                    background: #006CC1;
+                }
+                QPushButton:disabled {
+                    background: #D0D0D0;
+                    color: #888;
+                }
+                QLabel {
+                    color: #1E1E1E;
+                }
+            """)

@@ -1288,3 +1288,26 @@ class StateDiagramWidget(QWidget):
 
         self._empty_label.setVisible(True)
         self._control_panel.set_signals([])
+
+    def update_theme(self, bg_color: str, fg_color: str) -> None:
+        """
+        Update colors for theme change.
+
+        Args:
+            bg_color: Background color hex string
+            fg_color: Foreground color hex string
+        """
+        # Update scroll area and rows container
+        self._scroll_area.setStyleSheet(f"""
+            QScrollArea {{
+                background: {bg_color};
+                border: none;
+            }}
+        """)
+        self._rows_container.setStyleSheet(f"background: {bg_color};")
+
+        # Force repaint of all rows
+        for row in self._rows.values():
+            row.repaint()
+
+        self._time_header.repaint()
