@@ -9,10 +9,8 @@ A professional-grade CAN bus analysis tool for parsing, decoding, streaming, and
 ## Screenshots
 
 ### Dark Theme
-![Dark Theme](images/Screenshot%202026-01-10%20at%202.06.26%20PM.png)
-
-### Light Theme (In Development)
-![Light Theme](images/Screenshot%202026-01-10%20at%202.33.37%20PM.png)
+![Dark Theme](/images/Screenshot%202026-01-10%20at%202.06.26%E2%80%AFPM.png)
+![Trace window](/images/Screenshot%202026-01-10%20at%202.33.37%E2%80%AFPM.png)
 
 ## Features
 
