@@ -19,7 +19,8 @@ class DataStore:
     def _init_database(self) -> None:
         """Create database schema."""
         with self._get_connection() as conn:
-            conn.execute("""
+            conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS signals (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     timestamp REAL NOT NULL,
@@ -30,7 +31,8 @@ class DataStore:
                     physical_value REAL NOT NULL,
                     unit TEXT
                 )
-            """)
+            """
+            )
 
             # Indices for performance
             conn.execute(
@@ -153,7 +155,10 @@ class DataStore:
                 yield self._row_to_signal(row)
 
     def get_signal_data(
-        self, signal_name: str, min_timestamp: Optional[float] = None
+        self,
+        signal_name: str,
+        min_timestamp: Optional[float] = None,
+        message_name: Optional[str] = None,
     ) -> tuple[List[float], List[float]]:
         """
         Fetch timestamps and physical values for a signal.
@@ -162,12 +167,18 @@ class DataStore:
         Args:
             signal_name: Name of signal to fetch.
             min_timestamp: If provided, only returns data newer than this.
+            message_name: If provided, filters by message name to avoid mixing
+                         signals with the same name from different messages.
 
         Returns:
             Tuple of (timestamps, values) lists.
         """
         query = "SELECT timestamp, physical_value FROM signals WHERE signal_name = ?"
-        params = [signal_name]
+        params: list = [signal_name]
+
+        if message_name is not None:
+            query += " AND message_name = ?"
+            params.append(message_name)
 
         if min_timestamp is not None:
             query += " AND timestamp > ?"

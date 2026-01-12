@@ -1039,10 +1039,15 @@ class StateDiagramWidget(QWidget):
         Load data from DataStore and build segments.
         Using full replacement for simple init.
         """
-        signal_name = full_name.split(".")[-1]
+        # Parse full_name as "MessageName.SignalName"
+        parts = full_name.split(".")
+        signal_name = parts[-1]
+        message_name = parts[0] if len(parts) > 1 else None
 
         # Get full history
-        timestamps, values = self._data_store.get_signal_data(signal_name)
+        timestamps, values = self._data_store.get_signal_data(
+            signal_name, message_name=message_name
+        )
 
         if not timestamps:
             self._last_loaded_ts[full_name] = 0.0
@@ -1132,10 +1137,13 @@ class StateDiagramWidget(QWidget):
 
         for full_name in self._active_signals:
             last_ts = self._last_loaded_ts.get(full_name, 0.0)
-            signal_name = full_name.split(".")[-1]
+            # Parse full_name as "MessageName.SignalName"
+            parts = full_name.split(".")
+            signal_name = parts[-1]
+            message_name = parts[0] if len(parts) > 1 else None
 
             new_ts, new_val = self._data_store.get_signal_data(
-                signal_name, min_timestamp=last_ts
+                signal_name, min_timestamp=last_ts, message_name=message_name
             )
 
             if new_ts:

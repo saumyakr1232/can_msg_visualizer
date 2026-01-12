@@ -466,10 +466,14 @@ class PlotWidget(QWidget):
 
     def _load_data_for_signal(self, full_name: str) -> None:
         """Load initial or missing data for a signal from DataStore."""
+        # Parse full_name as "MessageName.SignalName"
+        parts = full_name.split(".")
+        signal_name = parts[-1]
+        message_name = parts[0] if len(parts) > 1 else None
 
-        signal_name = full_name.split(".")[-1]
-
-        timestamps, values = self._data_store.get_signal_data(signal_name)
+        timestamps, values = self._data_store.get_signal_data(
+            signal_name, message_name=message_name
+        )
 
         # Set time offset on first data load (first timestamp becomes 0)
         if timestamps and self._time_offset is None:
@@ -507,11 +511,14 @@ class PlotWidget(QWidget):
                 continue
 
             last_ts = self._last_loaded_ts[full_name]
-            signal_name = full_name.split(".")[-1]
+            # Parse full_name as "MessageName.SignalName"
+            parts = full_name.split(".")
+            signal_name = parts[-1]
+            message_name = parts[0] if len(parts) > 1 else None
 
             # Fetch incremental
             new_ts, new_val = self._data_store.get_signal_data(
-                signal_name, min_timestamp=last_ts
+                signal_name, min_timestamp=last_ts, message_name=message_name
             )
 
             if new_ts:
